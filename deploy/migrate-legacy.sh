@@ -52,14 +52,19 @@ if [[ -f "$WG_CONFIG" ]]; then
   chmod 600 "$WG_CONFIG"
 fi
 
-if [[ -d "$NEW_STATE/keys" ]]; then
+rename_stage_dirs() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
   while IFS= read -r -d '' old_stage; do
     new_stage="${old_stage//.afterglow-stage-/.waygate-stage-}"
     [[ "$old_stage" == "$new_stage" ]] && continue
     [[ ! -e "$new_stage" ]] || { echo "migration conflict: $new_stage exists" >&2; exit 1; }
     mv -- "$old_stage" "$new_stage"
-  done < <(find "$NEW_STATE/keys" -mindepth 1 -maxdepth 1 -type d -name '.afterglow-stage-*' -print0)
-fi
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '.afterglow-stage-*' -print0)
+}
+
+rename_stage_dirs /etc/wireguard
+rename_stage_dirs "$NEW_STATE/keys"
 
 if command -v iptables >/dev/null 2>&1; then
   legacy_filter=(
