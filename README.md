@@ -58,7 +58,29 @@ API_ALLOWED_CIDRS=192.0.2.0/24
 API_DOCS_ENABLED=false
 ```
 
-`deploy/cloud-init.yaml` is a native VM bootstrap template. Replace its placeholders before provisioning. It writes the root-only environment file, installs the required OS tools, creates `/run/xtables.lock`, and enables the already-installed native service.
+`deploy/install.sh` is the supported one-step native installer. It builds the pinned wheel, installs the runtime virtual environment, writes the root-only environment file, installs the systemd/tmpfiles artifacts, and starts the service. It can install from exported variables, an environment file, or the interactive wizard below.
+
+## Automated native installation
+
+Environment-driven installation:
+
+```bash
+export WG_SERVER_HOST=203.0.113.10
+export API_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export API_ALLOWED_CIDRS=198.51.100.10/32
+export WG_OUTBOUND_INTERFACE=eth0
+./deploy/install.sh
+```
+
+The installer self-elevates with `sudo`, preserves only the supported configuration variables, and never prints `API_AUTH_TOKEN`.
+
+The standard-library terminal wizard asks for the same values, masks the token, generates one when left blank, and invokes the installer:
+
+```bash
+python3 deploy/install-tui.py
+```
+
+For unattended VM provisioning, edit the four required placeholders in `deploy/cloud-init.yaml` and provide it as OpenStack user-data. Cloud-init downloads the configured repository branch, runs the same installer, and starts the native service. Replace the `main.tar.gz` URL with a reviewed commit or release URL for production.
 
 The API owns non-infrastructure client settings:
 
@@ -117,7 +139,7 @@ Profile-bearing responses use `Cache-Control: no-store`. Share tokens are never 
 
 ## Native deployment (default)
 
-The VM-first path installs the wheel under `/opt/afterglow-wg-agent`, writes `/etc/afterglow-wg-agent.env`, and runs the systemd unit directly on the host. `deploy/cloud-init.yaml` can provide the required environment and OS bootstrap during VM provisioning.
+The VM-first path builds and installs the wheel under `/opt/afterglow-wg-agent`, writes `/etc/afterglow-wg-agent.env`, and runs the systemd unit directly on the host. Use `deploy/install.sh` for normal installations; the manual commands below are only for an already-built artifact.
 
 For a preinstalled native artifact:
 

@@ -1,11 +1,13 @@
 #cloud-config
-# Native VM bootstrap. Replace every __PLACEHOLDER__ before provisioning.
-# The application wheel must already be installed at /opt/afterglow-wg-agent.
+# One-step native VM install. Replace the __PLACEHOLDER__ values first.
+# For production, pin the source URL below to a reviewed commit or release.
 package_update: true
 packages:
+  - ca-certificates
+  - curl
   - iproute2
   - iptables
-  - python3-venv
+  - software-properties-common
   - wireguard-tools
 
 write_files:
@@ -27,17 +29,9 @@ write_files:
       API_HOST=0.0.0.0
       API_PORT=8080
       WG_PERSISTENT_KEEPALIVE=25
-      ALLOW_INSECURE_HTTP=false
+      # Set false when an HTTPS reverse proxy terminates the API.
+      ALLOW_INSECURE_HTTP=true
       API_DOCS_ENABLED=false
 
-  - path: /etc/tmpfiles.d/afterglow-wg-agent.conf
-    owner: root:root
-    permissions: '0644'
-    content: |
-      f /run/xtables.lock 0600 root root -
-
 runcmd:
-  - [sh, -c, 'test -x /opt/afterglow-wg-agent/.venv/bin/afterglow-wg-agent || { echo "afterglow-wg-agent is not installed under /opt" >&2; exit 1; }']
-  - [systemd-tmpfiles, --create, /etc/tmpfiles.d/afterglow-wg-agent.conf]
-  - [systemctl, daemon-reload]
-  - [systemctl, enable, --now, afterglow-wg-agent.service]
+  - [bash, -lc, 'set -euo pipefail; rm -rf /opt/afterglow-wg-agent-source; install -d -m 0755 /opt/afterglow-wg-agent-source; curl --fail --location https://github.com/jung-geun/wg-simple-api/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /opt/afterglow-wg-agent-source; /opt/afterglow-wg-agent-source/deploy/install.sh --env-file /etc/afterglow-wg-agent.env --source-dir /opt/afterglow-wg-agent-source']
