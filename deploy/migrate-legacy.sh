@@ -53,7 +53,7 @@ fi
 legacy_footprint=0
 for path in "$OLD_STATE" "$OLD_ENV" "$OLD_UNIT" "$OLD_TMPFILES" /opt/afterglow-wg-agent; do
   [[ -e "$path" ]] && legacy_footprint=1
- done
+done
 ((legacy_policy_present == 1)) && legacy_footprint=1
 
 if ((legacy_footprint == 0)); then
