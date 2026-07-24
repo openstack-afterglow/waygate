@@ -231,7 +231,7 @@ systemctl daemon-reload
 if ((NO_START == 0)); then
   systemctl enable --now "$APP_NAME.service"
   healthy=0
-  for _ in {1..30}; do
+  for _ in {1..90}; do
     if curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:${API_PORT}/healthz" >/dev/null 2>&1; then
       healthy=1
       break
@@ -239,7 +239,7 @@ if ((NO_START == 0)); then
     sleep 1
   done
   if ((healthy == 0)); then
-    echo "Service did not become healthy within 30 seconds" >&2
+    echo "Service did not become healthy within 90 seconds" >&2
     systemctl --no-pager --full status "$APP_NAME.service" >&2 || true
     exit 1
   fi
