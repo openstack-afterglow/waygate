@@ -68,7 +68,7 @@ Environment-driven installation:
 export WG_SERVER_HOST=203.0.113.10
 export API_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export API_ALLOWED_CIDRS=198.51.100.10/32
-export WG_OUTBOUND_INTERFACE=eth0
+export WG_OUTBOUND_INTERFACE= # auto-detect the default route interface
 ./deploy/install.sh
 ```
 
@@ -81,6 +81,47 @@ python3 deploy/install-tui.py
 ```
 
 For unattended VM provisioning, edit the four required placeholders in `deploy/cloud-init.yaml` and provide it as OpenStack user-data. Cloud-init downloads the configured repository branch, runs the same installer, and starts the native service. Replace the `main.tar.gz` URL with a reviewed commit or release URL for production.
+
+### Create an OpenStack VM from zero
+
+`deploy/openstack-create.sh` creates the security group, allocates a floating IP, creates the VM, attaches the floating IP, and passes `deploy/cloud-init-openstack.yaml` as user-data. The cloud-init file generates the API token, installs the native service, and waits for both the API and the prototype web console.
+
+Prerequisites:
+
+- OpenStack CLI installed and authenticated (`source openrc`)
+- An Ubuntu image, flavor, tenant network, external floating-IP network, and keypair
+- `OS_ADMIN_CIDR` set to the administrator's public CIDR; this restricts SSH and the prototype API
+
+Example:
+
+```bash
+source openrc
+export OS_IMAGE="Ubuntu 24.04"
+export OS_FLAVOR="m1.small"
+export OS_NETWORK="private"
+export OS_EXTERNAL_NETWORK="public"
+export OS_KEYPAIR="my-openstack-key"
+export OS_ADMIN_CIDR="198.51.100.10/32"
+export AFTERGLOW_SERVER_NAME="afterglow-wg"
+
+./deploy/openstack-create.sh
+```
+
+The command prints the allocated floating IP and, after VM creation:
+
+```text
+web_console=http://FLOATING_IP:8080/
+api_status=http://FLOATING_IP:8080/api/v1/status
+ssh=ssh ubuntu@FLOATING_IP
+```
+
+The web console is served at `/` and uses the generated bearer token. Retrieve the token only when needed:
+
+```bash
+ssh ubuntu@FLOATING_IP 'sudo cat /etc/afterglow-wg-agent.env'
+```
+
+The prototype mode intentionally enables HTTP on port `8080`. Use a reviewed HTTPS reverse proxy and set `ALLOW_INSECURE_HTTP=false` before production exposure. The development Git remote is `git@github.com:openstack-afterglow/waygate.git`; cloud-init downloads the public repository tarball over HTTPS because a fresh VM has no GitHub deploy key.
 
 The API owns non-infrastructure client settings:
 
