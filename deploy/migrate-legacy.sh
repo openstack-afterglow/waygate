@@ -8,9 +8,14 @@ OLD_ENV=/etc/afterglow-wg-agent.env
 NEW_ENV=/etc/waygate.env
 OLD_UNIT=/etc/systemd/system/afterglow-wg-agent.service
 OLD_TMPFILES=/etc/tmpfiles.d/afterglow-wg-agent.conf
-WG_CONFIG=/etc/wireguard/wg0.conf
+WG_INTERFACE="${WG_INTERFACE:-wg0}"
+WG_CONFIG="/etc/wireguard/${WG_INTERFACE}.conf"
 
 [[ $EUID == 0 ]] || { echo "migrate-legacy.sh must run as root" >&2; exit 1; }
+
+if command -v ip >/dev/null 2>&1 && ip link show "$WG_INTERFACE" >/dev/null 2>&1; then
+  ip link set "$WG_INTERFACE" down
+fi
 
 move_directory() {
   local old="$1" new="$2"
