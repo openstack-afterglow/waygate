@@ -112,7 +112,7 @@ class AgentService:
     def _validate_runtime_names(self, client_ids: set[UUID], *, cleanup_orphans: bool) -> None:
         client_pattern = re.compile(r"client-([0-9a-f-]{36})\.key\Z")
         tmp_pattern = re.compile(r"\.tmp-([0-9a-f-]{36})\Z")
-        stage_pattern = re.compile(r"\.afterglow-stage-([0-9a-f-]{36})\Z")
+        stage_pattern = re.compile(r"\.waygate-stage-([0-9a-f-]{36})\Z")
         changed_keys = False
         for entry in self.paths.key_dir.iterdir():
             if entry.name == "server.key":
@@ -153,7 +153,7 @@ class AgentService:
                 shutil.rmtree(entry)
                 changed_stages = True
                 continue
-            if entry.name.startswith(".afterglow-stage-"):
+            if entry.name.startswith(".waygate-stage-"):
                 raise error(503, "state_reconciliation_failed", "State reconciliation failed")
         if changed_stages:
             fsync_directory(self.paths.wireguard_dir)

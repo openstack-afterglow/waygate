@@ -2,10 +2,10 @@ from ipaddress import IPv4Interface
 
 from fastapi.testclient import TestClient
 
-from afterglow_wg_agent.domain import InterfaceSnapshot, KeyPair
-from afterglow_wg_agent.main import create_app
-from afterglow_wg_agent.paths import RuntimePaths
-from afterglow_wg_agent.settings import Settings
+from waygate.domain import InterfaceSnapshot, KeyPair
+from waygate.main import create_app
+from waygate.paths import RuntimePaths
+from waygate.settings import Settings
 
 
 class FakeControl:

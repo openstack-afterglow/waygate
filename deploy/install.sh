@@ -2,14 +2,14 @@
 set -Eeuo pipefail
 umask 077
 
-APP_NAME="afterglow-wg-agent"
-INSTALL_DIR="/opt/afterglow-wg-agent"
-ENV_DEST="/etc/afterglow-wg-agent.env"
-SERVICE_PATH="/etc/systemd/system/afterglow-wg-agent.service"
-TMPFILES_PATH="/etc/tmpfiles.d/afterglow-wg-agent.conf"
+APP_NAME="waygate"
+INSTALL_DIR="/opt/waygate"
+ENV_DEST="/etc/waygate.env"
+SERVICE_PATH="/etc/systemd/system/waygate.service"
+TMPFILES_PATH="/etc/tmpfiles.d/waygate.conf"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="${AFTERGLOW_ENV_FILE:-}"
+ENV_FILE="${WAYGATE_ENV_FILE:-}"
 CLEANUP_ENV_FILE=""
 AUTO_ENV_FILE=0
 NO_START=0
@@ -77,7 +77,7 @@ done
 
 if ((EUID != 0)); then
   if [[ -z "$ENV_FILE" ]]; then
-    ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/afterglow-install-env.XXXXXX")"
+    ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/waygate-install-env.XXXXXX")"
     chmod 600 "$ENV_FILE"
     trap 'rm -f -- "$ENV_FILE"' EXIT
     AUTO_ENV_FILE=1
@@ -153,7 +153,7 @@ fi
   exit 2
 }
 
-WORK_DIR="$(mktemp -d /tmp/afterglow-build.XXXXXX)"
+WORK_DIR="$(mktemp -d /tmp/waygate-build.XXXXXX)"
 cleanup() {
   rm -rf -- "$WORK_DIR"
   if [[ -n "$CLEANUP_ENV_FILE" ]]; then
@@ -162,14 +162,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Archive first so re-running from /opt/afterglow-wg-agent is safe.
+# Archive first so re-running from /opt/waygate is safe.
 tar -C "$SOURCE_DIR" \
   --exclude=.git --exclude=.env --exclude=.venv --exclude=.build-venv \
   --exclude=build --exclude=dist --exclude='__pycache__' \
   -cf "$WORK_DIR/source.tar" .
 
-if systemctl list-unit-files "$APP_NAME.service" >/dev/null 2>&1 && systemctl is-active --quiet "$APP_NAME.service"; then
-  systemctl stop "$APP_NAME.service"
+for service in "$APP_NAME.service" afterglow-wg-agent.service; do
+  if systemctl list-unit-files "$service" >/dev/null 2>&1 && systemctl is-active --quiet "$service"; then
+    systemctl stop "$service"
+  fi
+done
+if [[ -x "$SOURCE_DIR/deploy/migrate-legacy.sh" ]]; then
+  "$SOURCE_DIR/deploy/migrate-legacy.sh"
+fi
+legacy_install=/opt/afterglow-wg-agent
+if [[ -d "$legacy_install" ]]; then
+  rm -rf -- "$legacy_install"
 fi
 rm -rf -- "$INSTALL_DIR"
 install -d -m 0755 -o root -g root "$INSTALL_DIR"
@@ -192,12 +201,12 @@ done
 [[ -n "$wheel_path" ]] || { echo "Wheel build produced no artifact" >&2; exit 1; }
 "$INSTALL_DIR/.venv/bin/python" -m pip install --no-deps "$wheel_path"
 
-install -d -m 0700 -o root -g root /var/lib/afterglow-wg-agent /var/lib/afterglow-wg-agent/keys /run/afterglow-wg-agent
-install -m 0644 -o root -g root "$INSTALL_DIR/deploy/afterglow-wg-agent.service" "$SERVICE_PATH"
-install -m 0644 -o root -g root "$INSTALL_DIR/deploy/afterglow-wg-agent.tmpfiles.conf" "$TMPFILES_PATH"
+install -d -m 0700 -o root -g root /var/lib/waygate /var/lib/waygate/keys /run/waygate
+install -m 0644 -o root -g root "$INSTALL_DIR/deploy/waygate.service" "$SERVICE_PATH"
+install -m 0644 -o root -g root "$INSTALL_DIR/deploy/waygate.tmpfiles.conf" "$TMPFILES_PATH"
 systemd-tmpfiles --create "$TMPFILES_PATH"
 
-env_tmp="$(mktemp /etc/.afterglow-wg-agent.env.XXXXXX)"
+env_tmp="$(mktemp /etc/.waygate.env.XXXXXX)"
 chmod 600 "$env_tmp"
 {
   printf 'WG_INTERFACE=%s\n' "$WG_INTERFACE"

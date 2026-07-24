@@ -138,7 +138,7 @@ class WgCliControl:
 
     def apply_config(self, interface: str, config_path: str) -> None:
         source = Path(config_path)
-        stage = source.parent / f".afterglow-stage-{uuid4()}"
+        stage = source.parent / f".waygate-stage-{uuid4()}"
         stage.mkdir(mode=0o700)
         runtime = stage / source.name
         lines = source.read_text(encoding="utf-8").splitlines()
@@ -175,7 +175,7 @@ def write_private_key(path: Path, private_key: str) -> None:
 
 def render_config(*, installation_id: UUID, private_key: str, address: IPv4Interface, port: int, clients: list[tuple[str, IPv4Interface, int]]) -> bytes:
     lines = [
-        "# Managed by afterglow-wg-agent; DO NOT EDIT.",
+        "# Managed by waygate; DO NOT EDIT.",
         f"# Installation-ID: {installation_id}",
         "[Interface]",
         f"PrivateKey = {private_key}",
@@ -188,7 +188,7 @@ def render_config(*, installation_id: UUID, private_key: str, address: IPv4Inter
 
 
 def install_config(path: Path, content: bytes) -> None:
-    stage = path.parent / f".afterglow-stage-{uuid4()}"
+    stage = path.parent / f".waygate-stage-{uuid4()}"
     stage.mkdir(mode=0o700)
     try:
         staged = stage / path.name

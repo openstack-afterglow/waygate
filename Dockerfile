@@ -18,5 +18,5 @@ RUN python -m venv /app/.venv \
     && /app/.venv/bin/pip install --require-hashes --no-deps -r requirements.lock \
     && /app/.venv/bin/pip install --no-deps /dist/*.whl
 EXPOSE 8080/tcp 51820/udp
-ENTRYPOINT ["/app/.venv/bin/afterglow-wg-agent"]
+ENTRYPOINT ["/app/.venv/bin/waygate"]
 CMD ["serve", "--require-runtime-mounts"]

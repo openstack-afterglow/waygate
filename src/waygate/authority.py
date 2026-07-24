@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID
 
-MARKER = "# Managed by afterglow-wg-agent; DO NOT EDIT."
+MARKER = "# Managed by waygate; DO NOT EDIT."
 INSTALLATION_PREFIX = "# Installation-ID: "
 
 
@@ -28,7 +28,7 @@ def managed_installation_id(content: bytes) -> UUID:
         installation_id = UUID(raw_id)
     except ValueError as exc:
         raise AuthorityError("managed config installation id is malformed") from exc
-    marker_stems = ("# Managed by afterglow-wg-agent", "# Installation-ID")
+    marker_stems = ("# Managed by waygate", "# Installation-ID")
     if installation_id.version != 4 or raw_id != str(installation_id) or any(line.startswith(marker_stems) for line in lines[2:]):
         raise AuthorityError("managed config identity marker is ambiguous")
     return installation_id

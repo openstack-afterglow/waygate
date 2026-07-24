@@ -1,5 +1,5 @@
-from afterglow_wg_agent.domain import PeerRuntime
-from afterglow_wg_agent.traffic import PeerTrafficSampler
+from waygate.domain import PeerRuntime
+from waygate.traffic import PeerTrafficSampler
 
 
 def peer(rx, tx):

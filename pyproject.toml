@@ -3,9 +3,9 @@ requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "afterglow-wg-agent"
+name = "waygate"
 version = "0.1.0"
-description = "Headless WireGuard controller for Project Afterglow"
+description = "Headless WireGuard controller for Project Waygate"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.139.2",
@@ -21,7 +21,7 @@ test = [
 ]
 
 [project.scripts]
-afterglow-wg-agent = "afterglow_wg_agent.main:run"
+waygate = "waygate.main:run"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -34,4 +34,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-afterglow_wg_agent = ["migrations/*.sql"]
+waygate = ["migrations/*.sql"]

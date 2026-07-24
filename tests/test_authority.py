@@ -2,7 +2,7 @@ from uuid import uuid1, uuid4
 
 import pytest
 
-from afterglow_wg_agent.authority import AuthorityError, INSTALLATION_PREFIX, MARKER, managed_installation_id
+from waygate.authority import AuthorityError, INSTALLATION_PREFIX, MARKER, managed_installation_id
 
 
 def config(installation_id):
@@ -24,7 +24,7 @@ def test_non_v4_installation_identity_is_rejected():
         managed_installation_id(config(uuid1()))
 
 
-@pytest.mark.parametrize("line", ["# Installation-ID:bad", "# Installation-ID:" + str(uuid4()), "# Managed by afterglow-wg-agent; EDITED"])
+@pytest.mark.parametrize("line", ["# Installation-ID:bad", "# Installation-ID:" + str(uuid4()), "# Managed by waygate; EDITED"])
 def test_marker_stems_outside_header_are_rejected(line):
     with pytest.raises(AuthorityError):
         managed_installation_id(config(uuid4()) + (line + "\n").encode())

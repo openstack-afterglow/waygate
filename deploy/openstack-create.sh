@@ -51,6 +51,8 @@ trap cleanup EXIT
 sed \
   -e "s|__PUBLIC_IP__|$FLOATING_IP|g" \
   -e "s|__ADMIN_CIDR__|$OS_ADMIN_CIDR|g" \
+  -e "s|__WEB_PORT__|$WEB_PORT|g" \
+  -e "s|__WG_PORT__|$WG_PORT|g" \
   "$TEMPLATE" > "$USER_DATA"
 
 SERVER_ID="$(openstack server create \
@@ -92,5 +94,5 @@ printf 'floating_ip=%s\n' "$FLOATING_IP"
 printf 'ssh=ssh ubuntu@%s\n' "$FLOATING_IP"
 printf 'web_console=%s\n' "$WEB_URL"
 printf 'api_status=http://%s:%s/api/v1/status\n' "$FLOATING_IP" "$WEB_PORT"
-printf 'api_token=ssh ubuntu@%s "sudo cat /etc/afterglow-wg-agent.env"\n' "$FLOATING_IP"
+printf 'api_token=ssh ubuntu@%s "sudo cat /etc/waygate.env"\n' "$FLOATING_IP"
 printf 'cloud_init=complete\n'

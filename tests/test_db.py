@@ -5,16 +5,16 @@ from uuid import uuid4
 
 import pytest
 
-from afterglow_wg_agent.db import ClientDraft, Database
-from afterglow_wg_agent.paths import RuntimePaths
+from waygate.db import ClientDraft, Database
+from waygate.paths import RuntimePaths
 
 
 def test_paths_are_fixed_in_production() -> None:
     paths = RuntimePaths.production()
-    assert paths.database == Path("/var/lib/afterglow-wg-agent/agent.db")
-    assert paths.key_dir == Path("/var/lib/afterglow-wg-agent/keys")
-    assert paths.instance_lock == Path("/var/lib/afterglow-wg-agent/instance.lock")
-    assert paths.operation_lock == Path("/run/afterglow-wg-agent/reconcile.lock")
+    assert paths.database == Path("/var/lib/waygate/agent.db")
+    assert paths.key_dir == Path("/var/lib/waygate/keys")
+    assert paths.instance_lock == Path("/var/lib/waygate/instance.lock")
+    assert paths.operation_lock == Path("/run/waygate/reconcile.lock")
 
 
 def test_migration_and_lowest_address_reuse(tmp_path: Path) -> None:

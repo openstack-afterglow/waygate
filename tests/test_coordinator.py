@@ -3,10 +3,10 @@ from ipaddress import IPv4Interface, IPv4Network
 
 import pytest
 
-from afterglow_wg_agent.domain import InterfaceSnapshot, KeyPair, PeerRuntime
-from afterglow_wg_agent.paths import RuntimePaths
-from afterglow_wg_agent.services import AgentService
-from afterglow_wg_agent.settings import Settings
+from waygate.domain import InterfaceSnapshot, KeyPair, PeerRuntime
+from waygate.paths import RuntimePaths
+from waygate.services import AgentService
+from waygate.settings import Settings
 
 
 class FakeWireGuard:

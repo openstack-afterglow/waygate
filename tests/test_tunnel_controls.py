@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 from ipaddress import IPv4Address, IPv4Network
 from uuid import uuid4
 
-from afterglow_wg_agent.db import ClientDraft, Database
-from afterglow_wg_agent.paths import RuntimePaths
+from waygate.db import ClientDraft, Database
+from waygate.paths import RuntimePaths
 
 
 def test_nondefault_mtu_and_keepalive_round_trip(tmp_path):

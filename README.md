@@ -118,7 +118,7 @@ ssh=ssh ubuntu@FLOATING_IP
 The web console is served at `/` and uses the generated bearer token. Retrieve the token only when needed:
 
 ```bash
-ssh ubuntu@FLOATING_IP 'sudo cat /etc/afterglow-wg-agent.env'
+ssh ubuntu@FLOATING_IP 'sudo cat /etc/waygate.env'
 ```
 
 The prototype mode intentionally enables HTTP on port `8080`. Use a reviewed HTTPS reverse proxy and set `ALLOW_INSECURE_HTTP=false` before production exposure. The development Git remote is `git@github.com:openstack-afterglow/waygate.git`; cloud-init downloads the public repository tarball over HTTPS because a fresh VM has no GitHub deploy key.
@@ -133,10 +133,10 @@ The API owns non-infrastructure client settings:
 
 Non-loopback HTTP requires an explicit `ALLOW_INSECURE_HTTP=true` decision and source CIDR restriction. HTTPS or a secure reverse proxy is recommended for public exposure. Runtime state and secrets are stored outside the repository at fixed paths:
 
-- `/var/lib/afterglow-wg-agent/agent.db`
-- `/var/lib/afterglow-wg-agent/keys/`
+- `/var/lib/waygate/agent.db`
+- `/var/lib/waygate/keys/`
 - `/etc/wireguard/wg0.conf`
-- `/run/afterglow-wg-agent/`
+- `/run/waygate/`
 
 ## Development
 
@@ -153,7 +153,7 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src tests
 The console entry point is:
 
 ```bash
-afterglow-wg-agent serve
+waygate serve
 ```
 
 The application performs lease acquisition, authority validation, restrictive network policy reconciliation, WireGuard convergence, and readback before serving requests.
@@ -180,16 +180,16 @@ Profile-bearing responses use `Cache-Control: no-store`. Share tokens are never 
 
 ## Native deployment (default)
 
-The VM-first path builds and installs the wheel under `/opt/afterglow-wg-agent`, writes `/etc/afterglow-wg-agent.env`, and runs the systemd unit directly on the host. Use `deploy/install.sh` for normal installations; the manual commands below are only for an already-built artifact.
+The VM-first path builds and installs the wheel under `/opt/waygate`, writes `/etc/waygate.env`, and runs the systemd unit directly on the host. Use `deploy/install.sh` for normal installations; the manual commands below are only for an already-built artifact.
 
 For a preinstalled native artifact:
 
 ```bash
-sudo install -m 0644 deploy/afterglow-wg-agent.service /etc/systemd/system/
-sudo install -m 0644 deploy/afterglow-wg-agent.tmpfiles.conf /etc/tmpfiles.d/afterglow-wg-agent.conf
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/afterglow-wg-agent.conf
+sudo install -m 0644 deploy/waygate.service /etc/systemd/system/
+sudo install -m 0644 deploy/waygate.tmpfiles.conf /etc/tmpfiles.d/waygate.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/waygate.conf
 sudo systemctl daemon-reload
-sudo systemctl enable --now afterglow-wg-agent.service
+sudo systemctl enable --now waygate.service
 ```
 
 The unit runs as root with `CAP_NET_ADMIN`, a private runtime directory, a fixed state directory, restricted filesystem access, and no access logging. Do not run native and Docker instances concurrently against the same state mount.
@@ -200,26 +200,26 @@ The unit runs as root with `CAP_NET_ADMIN`, a private runtime directory, a fixed
 Build the image:
 
 ```bash
-sudo docker build --pull -t afterglow-wg-agent:dev .
+sudo docker build --pull -t waygate:dev .
 ```
 
 Run with the exact state/config/runtime mounts and only the required network capability:
 
 ```bash
 sudo docker run -d \
-  --name afterglow-wg-agent \
+  --name waygate \
   --restart=on-failure:5 \
   -p 8080:8080/tcp \
   -p 51820:51820/udp \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN \
   --sysctl net.ipv4.ip_forward=1 \
-  --env-file /etc/afterglow-wg-agent.env \
+  --env-file /etc/waygate.env \
   -e WG_OUTBOUND_INTERFACE=eth0 \
   --mount type=bind,src=/etc/wireguard,dst=/etc/wireguard \
-  --mount type=bind,src=/var/lib/afterglow-wg-agent,dst=/var/lib/afterglow-wg-agent \
-  --tmpfs /run/afterglow-wg-agent:rw,noexec,nosuid,size=1m,mode=0700 \
-  afterglow-wg-agent:dev
+  --mount type=bind,src=/var/lib/waygate,dst=/var/lib/waygate \
+  --tmpfs /run/waygate:rw,noexec,nosuid,size=1m,mode=0700 \
+  waygate:dev
 ```
 
 When using Docker bridge networking, include the Docker bridge CIDR in `API_ALLOWED_CIDRS` if published API requests arrive from that bridge source range. The `serve --require-runtime-mounts` mode exits before state or network side effects when required mounts are absent.

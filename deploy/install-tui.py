@@ -69,7 +69,7 @@ def main() -> int:
         print("Usage: python3 deploy/install-tui.py")
         print("Interactively collect environment variables and run deploy/install.sh.")
         return 0
-    print("Afterglow WireGuard Agent installer")
+    print("Waygate WireGuard Agent installer")
     print("Values are written to a temporary root-only file and removed after install.\n")
 
     server_host = ask("Public WireGuard server IP/DNS", required=True)
@@ -131,7 +131,7 @@ def main() -> int:
     temp_path = ""
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", prefix="afterglow-tui-", suffix=".env", delete=False
+            mode="w", prefix="waygate-tui-", suffix=".env", delete=False
         ) as handle:
             temp_path = handle.name
             os.chmod(temp_path, 0o600)
@@ -151,7 +151,7 @@ def main() -> int:
             Path(temp_path).unlink(missing_ok=True)
 
     print("\nInstallation complete.")
-    print("The generated API token is stored in /etc/afterglow-wg-agent.env with mode 0600.")
+    print("The generated API token is stored in /etc/waygate.env with mode 0600.")
     return 0
 
 

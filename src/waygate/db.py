@@ -173,7 +173,7 @@ class Database:
                 schema = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
                 if schema is None:
                     version, filename = migrations[0]
-                    connection.executescript(files("afterglow_wg_agent.migrations").joinpath(filename).read_text(encoding="utf-8"))
+                    connection.executescript(files("waygate.migrations").joinpath(filename).read_text(encoding="utf-8"))
                     connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)", (version, _timestamp(datetime.now(UTC))))
                 elif connection.execute("SELECT 1 FROM schema_migrations WHERE version=1").fetchone() is None:
                     raise RuntimeError("database migration state is incomplete")
@@ -181,7 +181,7 @@ class Database:
                     raise RuntimeError("database migration version is newer than this agent")
                 for version, filename in migrations[1:]:
                     if connection.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone() is None:
-                        connection.executescript(files("afterglow_wg_agent.migrations").joinpath(filename).read_text(encoding="utf-8"))
+                        connection.executescript(files("waygate.migrations").joinpath(filename).read_text(encoding="utf-8"))
                         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)", (version, _timestamp(datetime.now(UTC))))
             finally:
                 connection.close()

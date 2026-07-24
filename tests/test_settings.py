@@ -1,7 +1,7 @@
 from pydantic import ValidationError
 import pytest
 
-from afterglow_wg_agent.settings import Settings
+from waygate.settings import Settings
 
 
 TOKEN = "t" * 32

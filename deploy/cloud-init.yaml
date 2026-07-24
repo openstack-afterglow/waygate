@@ -11,7 +11,7 @@ packages:
   - wireguard-tools
 
 write_files:
-  - path: /etc/afterglow-wg-agent.env
+  - path: /etc/waygate.env
     owner: root:root
     permissions: '0600'
     content: |
@@ -34,4 +34,4 @@ write_files:
       API_DOCS_ENABLED=false
 
 runcmd:
-  - [bash, -lc, 'set -euo pipefail; rm -rf /opt/afterglow-wg-agent-source; install -d -m 0755 /opt/afterglow-wg-agent-source; curl --fail --location https://github.com/openstack-afterglow/waygate/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /opt/afterglow-wg-agent-source; /opt/afterglow-wg-agent-source/deploy/install.sh --env-file /etc/afterglow-wg-agent.env --source-dir /opt/afterglow-wg-agent-source']
+  - [bash, -lc, 'set -euo pipefail; rm -rf /opt/waygate-source; install -d -m 0755 /opt/waygate-source; curl --fail --location https://github.com/openstack-afterglow/waygate/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /opt/waygate-source; /opt/waygate-source/deploy/install.sh --env-file /etc/waygate.env --source-dir /opt/waygate-source']

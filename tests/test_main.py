@@ -2,10 +2,10 @@ from ipaddress import IPv4Interface
 
 from fastapi.testclient import TestClient
 
-from afterglow_wg_agent.domain import InterfaceSnapshot, KeyPair
-from afterglow_wg_agent.main import create_app
-from afterglow_wg_agent.paths import RuntimePaths
-from afterglow_wg_agent.settings import Settings
+from waygate.domain import InterfaceSnapshot, KeyPair
+from waygate.main import create_app
+from waygate.paths import RuntimePaths
+from waygate.settings import Settings
 
 
 class FakeControl:
@@ -33,5 +33,5 @@ def test_health_starts_lifespan_with_fake_control(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     config = (tmp_path / "wireguard" / "wg0.conf").read_text()
-    assert config.startswith("# Managed by afterglow-wg-agent; DO NOT EDIT.\n# Installation-ID: ")
+    assert config.startswith("# Managed by waygate; DO NOT EDIT.\n# Installation-ID: ")
     assert "PrivateKey = private" in config

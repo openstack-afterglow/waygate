@@ -3,7 +3,7 @@ from ipaddress import IPv4Address, IPv4Network
 import pytest
 from pydantic import ValidationError
 
-from afterglow_wg_agent.contracts import ClientCreate, ClientPatch, ClientPut
+from waygate.contracts import ClientCreate, ClientPatch, ClientPut
 
 
 def test_create_normalizes_name_routes_and_dns() -> None:

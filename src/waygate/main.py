@@ -190,12 +190,12 @@ def _required_runtime_mounts(content: str) -> bool:
         mountpoint = _mountinfo_unescape(fields[4])
         options = set(fields[5].split(",")) | set(post[2].split(","))
         mounts[mountpoint] = (post[0], _mountinfo_unescape(post[1]), options)
-    required = {"/etc/wireguard", "/var/lib/afterglow-wg-agent", "/run/afterglow-wg-agent"}
+    required = {"/etc/wireguard", "/var/lib/waygate", "/run/waygate"}
     if not required.issubset(mounts):
         return False
     wireguard_type, wireguard_source, _ = mounts["/etc/wireguard"]
-    state_type, state_source, _ = mounts["/var/lib/afterglow-wg-agent"]
-    run_type, _, run_options = mounts["/run/afterglow-wg-agent"]
+    state_type, state_source, _ = mounts["/var/lib/waygate"]
+    run_type, _, run_options = mounts["/run/waygate"]
     if wireguard_type == "tmpfs" or state_type == "tmpfs" or not wireguard_source or not state_source:
         return False
     return run_type == "tmpfs" and {"rw", "noexec", "nosuid"}.issubset(run_options) and ("mode=0700" in run_options or "mode=700" in run_options)

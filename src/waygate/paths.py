@@ -20,13 +20,13 @@ class RuntimePaths:
 
     @classmethod
     def production(cls) -> "RuntimePaths":
-        state_dir = Path("/var/lib/afterglow-wg-agent")
+        state_dir = Path("/var/lib/waygate")
         return cls(
             state_dir=state_dir,
             key_dir=state_dir / "keys",
             database=state_dir / "agent.db",
             instance_lock=state_dir / "instance.lock",
-            operation_lock=Path("/run/afterglow-wg-agent/reconcile.lock"),
+            operation_lock=Path("/run/waygate/reconcile.lock"),
             wireguard_dir=Path("/etc/wireguard"),
         )
 

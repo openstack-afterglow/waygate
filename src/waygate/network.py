@@ -1,4 +1,4 @@
-"""Fail-closed, owned iptables policy generations for Afterglow."""
+"""Fail-closed, owned iptables policy generations for Waygate."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _BLOCKED = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.
 
 
 class LinuxNetworkControl:
-    """Changes only AFTERGLOW-owned chains. A live generation is never flushed."""
+    """Changes only WAYGATE-owned chains. A live generation is never flushed."""
 
     def __init__(self, run: Callable[[list[str]], subprocess.CompletedProcess[bytes]] | None = None) -> None:
         self._execute = run
@@ -66,7 +66,7 @@ class LinuxNetworkControl:
             raise NetworkUnavailable("stage rule readback mismatch")
 
     def _install_boot_guards(self, interface: str, vpn: IPv4Network, api_port: int) -> None:
-        guards = (("AFTERGLOW_BOOT_INPUT", (("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-p", "tcp", "--dport", str(api_port), "-j", "REJECT"), ("-j", "RETURN"))), ("AFTERGLOW_BOOT_FWD", (("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-o", interface, "-d", str(vpn), "-j", "DROP"), ("-j", "RETURN"))))
+        guards = (("WAYGATE_BOOT_INPUT", (("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-p", "tcp", "--dport", str(api_port), "-j", "REJECT"), ("-j", "RETURN"))), ("WAYGATE_BOOT_FWD", (("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-o", interface, "-d", str(vpn), "-j", "DROP"), ("-j", "RETURN"))))
         for chain, rules in guards:
             self._ensure_chain("filter", chain)
             existing = [line for line in self._run("-S", chain).stdout.decode("utf-8", "replace").splitlines() if line.startswith(f"-A {chain} ")]
@@ -77,19 +77,19 @@ class LinuxNetworkControl:
             if not existing:
                 for rule in rules:
                     self._run("-A", chain, *rule)
-        for parent, stage, chain in (("INPUT", "AFTERGLOW_STAGE_IN", "AFTERGLOW_BOOT_INPUT"), ("FORWARD", "AFTERGLOW_STAGE_FWD", "AFTERGLOW_BOOT_FWD")):
+        for parent, stage, chain in (("INPUT", "WAYGATE_STAGE_IN", "WAYGATE_BOOT_INPUT"), ("FORWARD", "WAYGATE_STAGE_FWD", "WAYGATE_BOOT_FWD")):
             if self._run("-C", parent, "-j", chain, check=False).returncode:
                 self._run("-I", parent, "2", "-j", chain)
             self._verify_boot_jump(parent, stage, chain)
 
     def _remove_boot_input_guard(self) -> None:
-        self._run("-D", "INPUT", "-j", "AFTERGLOW_BOOT_INPUT")
+        self._run("-D", "INPUT", "-j", "WAYGATE_BOOT_INPUT")
 
     def release_first_activation_forward_guard(self) -> None:
-        if self._run("-C", "FORWARD", "-j", "AFTERGLOW_BOOT_FWD", check=False).returncode == 0:
-            self._verify_boot_jump("FORWARD", "AFTERGLOW_STAGE_FWD", "AFTERGLOW_BOOT_FWD")
-            self._run("-D", "FORWARD", "-j", "AFTERGLOW_BOOT_FWD")
-            if self._run("-C", "FORWARD", "-j", "AFTERGLOW_BOOT_FWD", check=False).returncode == 0:
+        if self._run("-C", "FORWARD", "-j", "WAYGATE_BOOT_FWD", check=False).returncode == 0:
+            self._verify_boot_jump("FORWARD", "WAYGATE_STAGE_FWD", "WAYGATE_BOOT_FWD")
+            self._run("-D", "FORWARD", "-j", "WAYGATE_BOOT_FWD")
+            if self._run("-C", "FORWARD", "-j", "WAYGATE_BOOT_FWD", check=False).returncode == 0:
                 raise NetworkUnavailable("forward guard removal readback mismatch")
 
     @staticmethod
@@ -164,12 +164,12 @@ class LinuxNetworkControl:
         return candidates[0]
 
     def _verify_nat(self, vpn: IPv4Network, outbound_interface: str) -> None:
-        expected = self._rule_key("AFTERGLOW_NAT", ("-s", str(vpn), "-o", outbound_interface, "-j", "MASQUERADE"))
-        lines = [line for line in self._run("-t", "nat", "-S", "AFTERGLOW_NAT").stdout.decode("utf-8", "replace").splitlines() if line.startswith("-A AFTERGLOW_NAT ")]
-        if [self._rule_key("AFTERGLOW_NAT", line) for line in lines] != [expected]:
+        expected = self._rule_key("WAYGATE_NAT", ("-s", str(vpn), "-o", outbound_interface, "-j", "MASQUERADE"))
+        lines = [line for line in self._run("-t", "nat", "-S", "WAYGATE_NAT").stdout.decode("utf-8", "replace").splitlines() if line.startswith("-A WAYGATE_NAT ")]
+        if [self._rule_key("WAYGATE_NAT", line) for line in lines] != [expected]:
             raise NetworkUnavailable("NAT rule readback mismatch")
         parent = [line for line in self._run("-t", "nat", "-S", "POSTROUTING").stdout.decode("utf-8", "replace").splitlines() if line.startswith("-A POSTROUTING ")]
-        if parent.count("-A POSTROUTING -j AFTERGLOW_NAT") != 1:
+        if parent.count("-A POSTROUTING -j WAYGATE_NAT") != 1:
             raise NetworkUnavailable("NAT jump readback mismatch")
 
     def _set_forwarding(self) -> None:
@@ -220,7 +220,7 @@ class LinuxNetworkControl:
             self._run("-t", table, "-A", chain, *rule)
 
     def validate_stage_chains(self, interface: str, client_ids: set[str] | None = None) -> None:
-        for chain in ("AFTERGLOW_STAGE_IN", "AFTERGLOW_STAGE_FWD", "AFTERGLOW_STAGE_OUT"):
+        for chain in ("WAYGATE_STAGE_IN", "WAYGATE_STAGE_FWD", "WAYGATE_STAGE_OUT"):
             if not self._exists("filter", chain):
                 continue
             lines = [line for line in self._run("-S", chain).stdout.decode("utf-8", "replace").splitlines() if line.startswith(f"-A {chain} ")]
@@ -231,7 +231,7 @@ class LinuxNetworkControl:
                 comment = tokens[tokens.index("--comment") + 1]
                 try:
                     tag, raw_id = comment.split(":", 1)
-                    if tag != "afterglow-stage" or UUID(raw_id).version != 4 or raw_id != str(UUID(raw_id)):
+                    if tag != "waygate-stage" or UUID(raw_id).version != 4 or raw_id != str(UUID(raw_id)):
                         raise ValueError
                 except (ValueError, IndexError):
                     raise NetworkUnavailable("stage rule drift")
@@ -245,20 +245,20 @@ class LinuxNetworkControl:
                         return None
                 input_interface = option_value("-i")
                 output_interface = option_value("-o")
-                if chain == "AFTERGLOW_STAGE_IN":
+                if chain == "WAYGATE_STAGE_IN":
                     if input_interface != interface or option_value("-s") is None or target != "REJECT" or output_interface is not None:
                         raise NetworkUnavailable("stage rule drift")
-                if chain == "AFTERGLOW_STAGE_FWD":
+                if chain == "WAYGATE_STAGE_FWD":
                     ingress = input_interface == interface and option_value("-s") is not None and target == "REJECT" and output_interface is None
                     egress = output_interface == interface and option_value("-d") is not None and target == "DROP" and input_interface is None
                     if not (ingress or egress):
                         raise NetworkUnavailable("stage rule drift")
-                if chain == "AFTERGLOW_STAGE_OUT" and (output_interface != interface or option_value("-d") is None or target != "DROP" or input_interface is not None):
+                if chain == "WAYGATE_STAGE_OUT" and (output_interface != interface or option_value("-d") is None or target != "DROP" or input_interface is not None):
                     raise NetworkUnavailable("stage rule drift")
 
     def clear_stage_rules(self, interface: str, client_ids: set[str] | None = None) -> None:
         self.validate_stage_chains(interface, client_ids)
-        for chain in ("AFTERGLOW_STAGE_IN", "AFTERGLOW_STAGE_FWD", "AFTERGLOW_STAGE_OUT"):
+        for chain in ("WAYGATE_STAGE_IN", "WAYGATE_STAGE_FWD", "WAYGATE_STAGE_OUT"):
             lines = [line for line in self._run("-S", chain).stdout.decode("utf-8", "replace").splitlines() if line.startswith(f"-A {chain} ")]
             for line in lines:
                 tokens = shlex.split(line)[2:]
@@ -276,8 +276,8 @@ class LinuxNetworkControl:
         return {rule: sum(self._rule_key(chain, line) == self._rule_key(chain, rule) for line in lines) for rule in expected}
 
     def _client_stage_rules(self, interface: str, address: str, client_id: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
-        tag = f"afterglow-stage:{client_id}"
-        return (("AFTERGLOW_STAGE_IN", ("-i", interface, "-s", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "REJECT")), ("AFTERGLOW_STAGE_FWD", ("-i", interface, "-s", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "REJECT")), ("AFTERGLOW_STAGE_FWD", ("-o", interface, "-d", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "DROP")), ("AFTERGLOW_STAGE_OUT", ("-o", interface, "-d", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "DROP")))
+        tag = f"waygate-stage:{client_id}"
+        return (("WAYGATE_STAGE_IN", ("-i", interface, "-s", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "REJECT")), ("WAYGATE_STAGE_FWD", ("-i", interface, "-s", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "REJECT")), ("WAYGATE_STAGE_FWD", ("-o", interface, "-d", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "DROP")), ("WAYGATE_STAGE_OUT", ("-o", interface, "-d", f"{address}/32", "-m", "comment", "--comment", tag, "-j", "DROP")))
 
     def stage_client(self, interface: str, address: str, client_id: str) -> None:
         grouped: dict[str, list[tuple[str, ...]]] = {}
@@ -317,7 +317,7 @@ class LinuxNetworkControl:
         if outbound_interface == interface:
             raise NetworkUnavailable("outbound interface must differ from WireGuard interface")
         # Stage chains are permanently first: create/enable quarantine lands here before peer application.
-        for chain, parent in (("AFTERGLOW_STAGE_IN", "INPUT"), ("AFTERGLOW_STAGE_FWD", "FORWARD"), ("AFTERGLOW_STAGE_OUT", "OUTPUT")):
+        for chain, parent in (("WAYGATE_STAGE_IN", "INPUT"), ("WAYGATE_STAGE_FWD", "FORWARD"), ("WAYGATE_STAGE_OUT", "OUTPUT")):
             self._ensure_chain("filter", chain)
             self._ensure_jump("filter", parent, chain, first=True)
             self._verify_stage_jump(parent, chain)
@@ -331,13 +331,13 @@ class LinuxNetworkControl:
                 forward_rules.append(("-i", interface, "-s", f"{policy.source}/32", "-o", outbound_interface, "-d", str(destination), "-j", "ACCEPT"))
         forward_rules += [("-o", interface, "-d", str(vpn), "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"), ("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-o", interface, "-d", str(vpn), "-j", "DROP"), ("-j", "RETURN")]
         # Build inactive generations before attaching them; retain an active policy until cutover.
-        input_active = self._active_generation("INPUT", "AFTERGLOW_INPUT")
-        forward_active = self._active_generation("FORWARD", "AFTERGLOW_FWD")
+        input_active = self._active_generation("INPUT", "WAYGATE_INPUT")
+        forward_active = self._active_generation("FORWARD", "WAYGATE_FWD")
         if (input_active is None) != (forward_active is None):
             raise NetworkUnavailable("partial firewall activation")
         first_activation = input_active is None
-        boot_input_attached = self._run("-C", "INPUT", "-j", "AFTERGLOW_BOOT_INPUT", check=False).returncode == 0
-        boot_forward_attached = self._run("-C", "FORWARD", "-j", "AFTERGLOW_BOOT_FWD", check=False).returncode == 0
+        boot_input_attached = self._run("-C", "INPUT", "-j", "WAYGATE_BOOT_INPUT", check=False).returncode == 0
+        boot_forward_attached = self._run("-C", "FORWARD", "-j", "WAYGATE_BOOT_FWD", check=False).returncode == 0
         input_boot_rules = (("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-p", "tcp", "--dport", str(api_port), "-j", "REJECT"), ("-j", "RETURN"))
         forward_boot_rules = (("-i", interface, "-s", str(vpn), "-j", "REJECT"), ("-o", interface, "-d", str(vpn), "-j", "DROP"), ("-j", "RETURN"))
         if first_activation:
@@ -345,14 +345,14 @@ class LinuxNetworkControl:
             boot_input_attached = True
             boot_forward_attached = True
         if boot_input_attached:
-            self._verify_boot_jump("INPUT", "AFTERGLOW_STAGE_IN", "AFTERGLOW_BOOT_INPUT")
-            self._verify_boot_rules("AFTERGLOW_BOOT_INPUT", input_boot_rules)
+            self._verify_boot_jump("INPUT", "WAYGATE_STAGE_IN", "WAYGATE_BOOT_INPUT")
+            self._verify_boot_rules("WAYGATE_BOOT_INPUT", input_boot_rules)
         if boot_forward_attached:
-            self._verify_boot_jump("FORWARD", "AFTERGLOW_STAGE_FWD", "AFTERGLOW_BOOT_FWD")
-            self._verify_boot_rules("AFTERGLOW_BOOT_FWD", forward_boot_rules)
+            self._verify_boot_jump("FORWARD", "WAYGATE_STAGE_FWD", "WAYGATE_BOOT_FWD")
+            self._verify_boot_rules("WAYGATE_BOOT_FWD", forward_boot_rules)
         input_next = "A" if input_active == "B" else "B"
         forward_next = "A" if forward_active == "B" else "B"
-        input_chain, forward_chain = f"AFTERGLOW_INPUT_{input_next}", f"AFTERGLOW_FWD_{forward_next}"
+        input_chain, forward_chain = f"WAYGATE_INPUT_{input_next}", f"WAYGATE_FWD_{forward_next}"
         self._replace_inactive("filter", input_chain, input_rules)
         self._replace_inactive("filter", forward_chain, forward_rules)
         # Parent position is authoritative: stage stays first, boot guard second while present,
@@ -364,20 +364,20 @@ class LinuxNetworkControl:
         self._verify_generation("INPUT", input_chain, int(input_generation_position), input_rules)
         self._verify_generation("FORWARD", forward_chain, int(forward_generation_position), forward_rules)
         if input_active is not None:
-            self._run("-D", "INPUT", "-j", f"AFTERGLOW_INPUT_{input_active}")
+            self._run("-D", "INPUT", "-j", f"WAYGATE_INPUT_{input_active}")
             remaining_input = [line for line in self._run("-S", "INPUT").stdout.decode("utf-8", "replace").splitlines() if line.startswith("-A INPUT ")]
-            if sum(line == f"-A INPUT -j {input_chain}" for line in remaining_input) != 1 or any(line == f"-A INPUT -j AFTERGLOW_INPUT_{input_active}" for line in remaining_input):
+            if sum(line == f"-A INPUT -j {input_chain}" for line in remaining_input) != 1 or any(line == f"-A INPUT -j WAYGATE_INPUT_{input_active}" for line in remaining_input):
                 raise NetworkUnavailable("old INPUT generation removal mismatch")
         if forward_active is not None:
-            self._run("-D", "FORWARD", "-j", f"AFTERGLOW_FWD_{forward_active}")
+            self._run("-D", "FORWARD", "-j", f"WAYGATE_FWD_{forward_active}")
             remaining_forward = [line for line in self._run("-S", "FORWARD").stdout.decode("utf-8", "replace").splitlines() if line.startswith("-A FORWARD ")]
-            if sum(line == f"-A FORWARD -j {forward_chain}" for line in remaining_forward) != 1 or any(line == f"-A FORWARD -j AFTERGLOW_FWD_{forward_active}" for line in remaining_forward):
+            if sum(line == f"-A FORWARD -j {forward_chain}" for line in remaining_forward) != 1 or any(line == f"-A FORWARD -j WAYGATE_FWD_{forward_active}" for line in remaining_forward):
                 raise NetworkUnavailable("old FORWARD generation removal mismatch")
         if boot_input_attached:
-            self._verify_boot_jump("INPUT", "AFTERGLOW_STAGE_IN", "AFTERGLOW_BOOT_INPUT")
+            self._verify_boot_jump("INPUT", "WAYGATE_STAGE_IN", "WAYGATE_BOOT_INPUT")
             self._remove_boot_input_guard()
             self._verify_generation("INPUT", input_chain, 2, input_rules)
-        self._replace_inactive("nat", "AFTERGLOW_NAT", [("-s", str(vpn), "-o", outbound_interface, "-j", "MASQUERADE")])
-        self._ensure_jump("nat", "POSTROUTING", "AFTERGLOW_NAT", first=False)
+        self._replace_inactive("nat", "WAYGATE_NAT", [("-s", str(vpn), "-o", outbound_interface, "-j", "MASQUERADE")])
+        self._ensure_jump("nat", "POSTROUTING", "WAYGATE_NAT", first=False)
         self._verify_nat(vpn, outbound_interface)
         self._set_forwarding()

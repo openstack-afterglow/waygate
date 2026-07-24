@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from afterglow_wg_agent.db import InstanceAlreadyRunning, InstanceLease
+from waygate.db import InstanceAlreadyRunning, InstanceLease
 
 
 def test_second_instance_lease_fails_without_releasing_first(tmp_path: Path):
