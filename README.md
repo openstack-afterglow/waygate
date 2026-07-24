@@ -25,9 +25,22 @@ A headless WireGuard controller for Project Afterglow. The service keeps SQLite 
 
 The pinned dependencies are in `requirements.lock`, `requirements-test.lock`, and `requirements-build.lock`.
 
-## Configuration
+## Configuration authority
 
-Copy `.env.example` to an environment file and replace the token and deployment-specific values:
+The native VM is the default runtime. Docker is an optional packaging mode for the same application and state layout; never run both modes against the same state mount at the same time.
+
+Cloud-init or the VM environment file supplies infrastructure-owned settings. The required endpoint value is `WG_SERVER_HOST`: it must be the public IP address or a public DNS name that peers use to reach the WireGuard server. It is separate from each client's tunnel address. A client's public network endpoint is learned by WireGuard during handshake; the API owns the client's private tunnel address and profile settings.
+
+Required infrastructure settings:
+
+- `WG_SERVER_HOST`
+- `API_AUTH_TOKEN` (at least 32 random characters)
+- `API_ALLOWED_CIDRS` when `API_HOST` is non-loopback
+- `WG_OUTBOUND_INTERFACE` when the default route cannot be selected automatically
+
+Optional infrastructure settings with safe defaults include the WireGuard interface and port, VPN subnet, default DNS, API bind/port, persistent keepalive, HTTPS public origin, documentation switch, and insecure-HTTP opt-in.
+
+Copy `.env.example` to an environment file and replace the deployment-specific values:
 
 ```dotenv
 WG_INTERFACE=wg0
@@ -44,6 +57,16 @@ ALLOW_INSECURE_HTTP=false
 API_ALLOWED_CIDRS=192.0.2.0/24
 API_DOCS_ENABLED=false
 ```
+
+`deploy/cloud-init.yaml` is a native VM bootstrap template. Replace its placeholders before provisioning. It writes the root-only environment file, installs the required OS tools, creates `/run/xtables.lock`, and enables the already-installed native service.
+
+The API owns non-infrastructure client settings:
+
+- client name and optional tunnel address
+- profile routes and DNS
+- MTU and persistent keepalive
+- enabled/disabled state
+- share-token lifetime and single-use policy
 
 Non-loopback HTTP requires an explicit `ALLOW_INSECURE_HTTP=true` decision and source CIDR restriction. HTTPS or a secure reverse proxy is recommended for public exposure. Runtime state and secrets are stored outside the repository at fixed paths:
 
@@ -92,9 +115,11 @@ All `/api/v1/**` endpoints require `Authorization: Bearer <API_AUTH_TOKEN>` unle
 
 Profile-bearing responses use `Cache-Control: no-store`. Share tokens are never stored in plaintext.
 
-## Native deployment
+## Native deployment (default)
 
-Install the pinned wheel under `/opt/afterglow-wg-agent`, install `deploy/afterglow-wg-agent.service`, create the environment file, and create the global xtables coordinator:
+The VM-first path installs the wheel under `/opt/afterglow-wg-agent`, writes `/etc/afterglow-wg-agent.env`, and runs the systemd unit directly on the host. `deploy/cloud-init.yaml` can provide the required environment and OS bootstrap during VM provisioning.
+
+For a preinstalled native artifact:
 
 ```bash
 sudo install -m 0644 deploy/afterglow-wg-agent.service /etc/systemd/system/
@@ -106,7 +131,8 @@ sudo systemctl enable --now afterglow-wg-agent.service
 
 The unit runs as root with `CAP_NET_ADMIN`, a private runtime directory, a fixed state directory, restricted filesystem access, and no access logging. Do not run native and Docker instances concurrently against the same state mount.
 
-## Docker deployment
+## Docker deployment (optional)
+
 
 Build the image:
 
