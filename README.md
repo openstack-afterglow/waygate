@@ -1,6 +1,6 @@
-# Afterglow WireGuard Agent
+# Waygate WireGuard Agent
 
-A headless WireGuard controller for Project Afterglow. The service keeps SQLite metadata, the managed WireGuard configuration, the live interface, and fail-closed Linux firewall policy synchronized without service restarts.
+A headless WireGuard controller for Waygate. The service keeps SQLite metadata, the managed WireGuard configuration, the live interface, and fail-closed Linux firewall policy synchronized without service restarts.
 
 ## Features
 
@@ -102,7 +102,7 @@ export OS_NETWORK="private"
 export OS_EXTERNAL_NETWORK="public"
 export OS_KEYPAIR="my-openstack-key"
 export OS_ADMIN_CIDR="198.51.100.10/32"
-export AFTERGLOW_SERVER_NAME="afterglow-wg"
+export WAYGATE_SERVER_NAME="waygate-wg"
 
 ./deploy/openstack-create.sh
 ```

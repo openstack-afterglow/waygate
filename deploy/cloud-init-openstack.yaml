@@ -36,4 +36,4 @@ write_files:
 runcmd:
   - [bash, -lc, 'set -euo pipefail; token=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))"); sed -i "s|^API_AUTH_TOKEN=.*|API_AUTH_TOKEN=$token|" /etc/afterglow-wg-agent.env']
   - [bash, -lc, 'set -euo pipefail; rm -rf /opt/afterglow-wg-agent-source; install -d -m 0755 /opt/afterglow-wg-agent-source; curl --fail --location https://github.com/openstack-afterglow/waygate/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /opt/afterglow-wg-agent-source; /opt/afterglow-wg-agent-source/deploy/install.sh --env-file /etc/afterglow-wg-agent.env --source-dir /opt/afterglow-wg-agent-source']
-  - [bash, -lc, 'set -euo pipefail; for i in $(seq 1 60); do curl --fail --silent --max-time 2 http://127.0.0.1:8080/ >/dev/null && exit 0; sleep 2; done; echo "Afterglow web console did not become ready" >&2; exit 1']
+  - [bash, -lc, 'set -euo pipefail; for i in $(seq 1 60); do curl --fail --silent --max-time 2 http://127.0.0.1:8080/ >/dev/null && exit 0; sleep 2; done; echo "Waygate web console did not become ready" >&2; exit 1']
