@@ -1,0 +1,37 @@
+[Unit]
+Description=Afterglow WireGuard agent
+After=network-online.target systemd-modules-load.service systemd-tmpfiles-setup.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/afterglow-wg-agent
+EnvironmentFile=/etc/afterglow-wg-agent.env
+ExecStart=/opt/afterglow-wg-agent/.venv/bin/afterglow-wg-agent serve
+UMask=0077
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=afterglow-wg-agent
+RuntimeDirectoryMode=0700
+StateDirectory=afterglow-wg-agent
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=false
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/etc/wireguard /var/lib/afterglow-wg-agent /run/afterglow-wg-agent /run/xtables.lock
+
+[Install]
+WantedBy=multi-user.target
