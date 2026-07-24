@@ -173,12 +173,12 @@ for service in "$APP_NAME.service" afterglow-wg-agent.service; do
     systemctl stop "$service"
   fi
 done
+if systemctl is-active --quiet afterglow-wg-agent.service; then
+  echo "legacy service is still active after stop" >&2
+  exit 1
+fi
 if [[ -x "$SOURCE_DIR/deploy/migrate-legacy.sh" ]]; then
   "$SOURCE_DIR/deploy/migrate-legacy.sh"
-fi
-legacy_install=/opt/afterglow-wg-agent
-if [[ -d "$legacy_install" ]]; then
-  rm -rf -- "$legacy_install"
 fi
 rm -rf -- "$INSTALL_DIR"
 install -d -m 0755 -o root -g root "$INSTALL_DIR"
@@ -245,4 +245,7 @@ if ((NO_START == 0)); then
   fi
 fi
 
+if ((NO_START == 0)) && [[ -d /opt/afterglow-wg-agent ]]; then
+  rm -rf -- /opt/afterglow-wg-agent
+fi
 printf 'installed=%s\nservice=%s\nendpoint=%s:%s\n' "$INSTALL_DIR" "$APP_NAME.service" "$WG_SERVER_HOST" "$WG_PORT"
