@@ -1,22 +1,42 @@
-FROM python:3.12-slim AS build
-WORKDIR /build
-COPY requirements-build.lock requirements.lock requirements-test.lock pyproject.toml ./
-RUN python -m venv /build/.venv \
-    && /build/.venv/bin/pip install --require-hashes -r requirements-build.lock \
-    && mkdir dist
-COPY src ./src
-RUN /build/.venv/bin/pip wheel --no-build-isolation --no-deps . -w dist
+FROM python:3.12-slim AS waygate-builder
 
-FROM python:3.12-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables \
-    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements.lock ./
-COPY --from=build /build/dist /dist
-RUN python -m venv /app/.venv \
-    && /app/.venv/bin/pip install --require-hashes --no-deps -r requirements.lock \
-    && /app/.venv/bin/pip install --no-deps /dist/*.whl
-EXPOSE 8080/tcp 51820/udp
-ENTRYPOINT ["/app/.venv/bin/waygate"]
-CMD ["serve", "--require-runtime-mounts"]
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    git \
+    libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock LICENSE ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY waygate/ ./waygate/
+RUN uv sync --frozen --no-dev
+
+FROM python:3.12-slim AS waygate-runtime
+
+WORKDIR /app
+
+COPY --from=waygate-builder /app/.venv /app/.venv
+COPY pyproject.toml uv.lock LICENSE ./
+COPY waygate/ ./waygate/
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m compileall -q waygate \
+    && adduser --disabled-password --gecos "" appuser \
+    && adduser appuser root \
+    && chown -R appuser:appuser /app
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+USER appuser
+
+FROM waygate-runtime AS waygate-api
+CMD ["uvicorn", "waygate.main:app", "--host", "0.0.0.0", "--port", "8010"]
+
+FROM waygate-runtime AS waygate-worker
+CMD ["python", "-m", "waygate.worker"]

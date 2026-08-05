@@ -1,0 +1,1 @@
+"""Waygate API routers."""

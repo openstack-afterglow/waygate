@@ -1,0 +1,323 @@
+#cloud-config
+# Waygate WireGuard 게이트웨이 에이전트 — 서버: {{ server_name }}
+# 서버 private key는 VM 내부에서만 생성되고 백엔드로 전송되지 않는다.
+
+package_update: true
+packages:
+  - wireguard
+  - curl
+  - python3
+  - iptables
+  - iproute2
+  - isc-dhcp-client
+
+write_files:
+  - path: /etc/sysctl.d/99-afterglow-wg-forward.conf
+    permissions: "0644"
+    content: |
+      net.ipv4.ip_forward=1
+
+  - path: /etc/wireguard/wg0.conf.head
+    permissions: "0600"
+    content: |
+      [Interface]
+      ListenPort = {{ listen_port | string | shlex_quote }}
+      SaveConfig = false
+
+  - path: /opt/afterglow/waygate-register.sh
+    permissions: "0750"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      REGISTER_URL={{ register_url | shlex_quote }}
+      BOOTSTRAP_TOKEN={{ bootstrap_token | shlex_quote }}
+
+      log() { echo "[waygate-register] $*" | tee -a /var/log/waygate-agent.log; }
+
+      # 서버 키쌍 최초 1회 생성 (재부팅 시 재사용)
+      if [ ! -f /etc/wireguard/privatekey ]; then
+        umask 077
+        wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+        chmod 600 /etc/wireguard/privatekey
+        chmod 644 /etc/wireguard/publickey
+        log "서버 키쌍 생성 완료"
+      fi
+
+      PRIVATE_KEY=$(cat /etc/wireguard/privatekey)
+      PUBLIC_KEY=$(cat /etc/wireguard/publickey)
+
+      # wg0.conf 초기 구성 (Peer 없음 — reconcile 루프가 채움)
+      { cat /etc/wireguard/wg0.conf.head; echo "PrivateKey = ${PRIVATE_KEY}"; } > /etc/wireguard/wg0.conf
+      chmod 600 /etc/wireguard/wg0.conf
+
+      systemctl enable wg-quick@wg0
+      systemctl start wg-quick@wg0 || systemctl restart wg-quick@wg0
+
+      log "register 콜백 전송: ${REGISTER_URL}"
+      HTTP_CODE=$(curl -s -o /tmp/waygate_register_response.txt -w "%{http_code}" \
+        -X POST "${REGISTER_URL}" \
+        -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"public_key\": \"${PUBLIC_KEY}\"}" \
+        --connect-timeout 10 --max-time 30) || HTTP_CODE="000"
+      RESPONSE=$(cat /tmp/waygate_register_response.txt 2>/dev/null || echo "")
+      if [ "${HTTP_CODE}" = "200" ] || [ "${HTTP_CODE}" = "204" ]; then
+        log "register 성공 (HTTP ${HTTP_CODE})"
+      else
+        log "register 실패 (HTTP ${HTTP_CODE}): ${RESPONSE} — reconcile 루프가 재시도"
+      fi
+
+  - path: /opt/afterglow/waygate-reconcile.py
+    permissions: "0750"
+    content: |
+      #!/usr/bin/env python3
+      """WireGuard reconcile 루프 — desired-state GET → wg syncconf → NAT masquerade → status POST."""
+      import ipaddress
+      import json
+      import subprocess
+      import sys
+      import urllib.request
+      import urllib.error
+      from datetime import datetime, timezone
+
+      DESIRED_STATE_URL = {{ desired_state_url | tojson }}
+      STATUS_URL = {{ status_url | tojson }}
+      BOOTSTRAP_TOKEN = {{ bootstrap_token | tojson }}
+      WG_IFACE = "wg0"
+      WG_CONF = "/etc/wireguard/wg0.conf"
+      WG_CONF_HEAD = "/etc/wireguard/wg0.conf.head"
+      PRIVATE_KEY_PATH = "/etc/wireguard/privatekey"
+      NAT_CHAIN = "WAYGATE-NAT"
+
+      LOG = "/var/log/waygate-agent.log"
+
+
+      def log(msg: str) -> None:
+          line = f"[{datetime.now(timezone.utc).isoformat()}] {msg}"
+          print(line)
+          try:
+              with open(LOG, "a") as f:
+                  f.write(line + "\n")
+          except OSError:
+              pass
+
+
+      def http_request(url: str, method: str = "GET", body: dict | None = None) -> dict | None:
+          headers = {"Authorization": f"Bearer {BOOTSTRAP_TOKEN}"}
+          data = None
+          if body is not None:
+              data = json.dumps(body).encode()
+              headers["Content-Type"] = "application/json"
+          req = urllib.request.Request(url, data=data, headers=headers, method=method)
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  raw = resp.read()
+                  if not raw:
+                      return {}
+                  return json.loads(raw)
+          except urllib.error.URLError as e:
+              log(f"HTTP {method} {url} 실패: {e}")
+              return None
+
+
+      def write_wg_conf(desired: dict) -> None:
+          with open(WG_CONF_HEAD) as f:
+              head = f.read()
+          with open(PRIVATE_KEY_PATH) as f:
+              private_key = f.read().strip()
+
+          lines = [head.rstrip("\n"), f"PrivateKey = {private_key}", ""]
+          for peer in desired.get("peers", []):
+              if not peer.get("enabled", True):
+                  continue
+              lines.append("[Peer]")
+              lines.append(f"PublicKey = {peer['public_key']}")
+              if peer.get("preshared_key"):
+                  lines.append(f"PresharedKey = {peer['preshared_key']}")
+              allowed = ", ".join(peer.get("allowed_ips", []))
+              lines.append(f"AllowedIPs = {allowed}")
+              lines.append("")
+
+          with open(WG_CONF, "w") as f:
+              f.write("\n".join(lines))
+          subprocess.run(["chmod", "600", WG_CONF], check=False)
+
+
+      def syncconf() -> None:
+          strip = subprocess.run(
+              ["wg-quick", "strip", WG_IFACE], capture_output=True, text=True, check=False
+          )
+          if strip.returncode != 0:
+              log(f"wg-quick strip 실패: {strip.stderr.strip()}")
+              return
+          sync = subprocess.run(
+              ["wg", "syncconf", WG_IFACE, "/dev/stdin"],
+              input=strip.stdout,
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          if sync.returncode != 0:
+              log(f"wg syncconf 실패: {sync.stderr.strip()}")
+
+
+      def collect_status() -> list[dict]:
+          dump = subprocess.run(
+              ["wg", "show", WG_IFACE, "dump"], capture_output=True, text=True, check=False
+          )
+          if dump.returncode != 0:
+              return []
+          peers = []
+          for i, line in enumerate(dump.stdout.strip().splitlines()):
+              if i == 0:
+                  continue  # 첫 줄은 인터페이스 자체 정보
+              parts = line.split("\t")
+              if len(parts) < 8:
+                  continue
+              pubkey, _psk, _endpoint, _allowed, latest_handshake, rx, tx, _keepalive = parts[:8]
+              peers.append(
+                  {
+                      "public_key": pubkey,
+                      "last_handshake_at": (
+                          datetime.fromtimestamp(int(latest_handshake), tz=timezone.utc).isoformat()
+                          if latest_handshake and latest_handshake != "0"
+                          else None
+                      ),
+                      "rx_bytes": int(rx or 0),
+                      "tx_bytes": int(tx or 0),
+                  }
+              )
+          return peers
+
+
+      def _interfaces_without_ipv4() -> list:
+          """IPv4 주소가 없는 인터페이스(핫플러그 직후 NIC) 목록. lo/wg0 제외."""
+          have_ip = set()
+          addr = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, check=False)
+          for line in addr.stdout.splitlines():
+              parts = line.split()
+              if len(parts) >= 2:
+                  have_ip.add(parts[1])
+          missing = []
+          link = subprocess.run(["ip", "-o", "link", "show"], capture_output=True, text=True, check=False)
+          for line in link.stdout.splitlines():
+              seg = line.split(":")
+              if len(seg) >= 2:
+                  name = seg[1].strip().split("@")[0]
+                  if name in ("lo", WG_IFACE):
+                      continue
+                  if name and name not in have_ip:
+                      missing.append(name)
+          return missing
+
+
+      def bring_up_hotplug_nics() -> None:
+          """핫플러그된 NIC 를 up + DHCP 로 구성한다(cloud image 는 부팅 NIC 만 자동 구성).
+
+          nova.attach_interface 는 Neutron 포트만 붙일 뿐 게스트 내부 IP 를 구성하지 않으므로,
+          이 단계 없이는 아래 masquerade 가 IP 없는 죽은 NIC 에 바인딩된다.
+          """
+          for nic in _interfaces_without_ipv4():
+              subprocess.run(["ip", "link", "set", nic, "up"], check=False)
+              try:
+                  subprocess.run(["dhclient", "-1", nic], capture_output=True, check=False, timeout=30)
+              except subprocess.TimeoutExpired:
+                  log(f"dhclient {nic} 타임아웃 — 다음 주기 재시도")
+              log(f"핫플러그 NIC {nic} DHCP 구성 시도")
+
+
+      def _outbound_nic(cidr: str):
+          try:
+              host = str(next(ipaddress.ip_network(cidr, strict=False).hosts()))
+          except (ValueError, StopIteration):
+              host = cidr.split("/")[0]
+          route = subprocess.run(["ip", "-o", "route", "get", host], capture_output=True, text=True, check=False)
+          parts = route.stdout.split()
+          if "dev" in parts:
+              return parts[parts.index("dev") + 1]
+          return None
+
+
+      def apply_masquerade(tunnel_cidr: str, nat_networks: list) -> None:
+          """tunnel_cidr → 각 nat CIDR 트래픽을 해당 NIC 로 SNAT masquerade. idempotent.
+
+          전용 체인 WAYGATE-NAT 를 flush 후 재적용하므로, 연결 해제된 네트워크의 규칙도 자동 반영된다
+          (nat_networks 가 비면 체인이 비워져 모든 SNAT 규칙이 제거됨). 모든 인자는 subprocess 리스트
+          인자(shell=False)로만 전달되고 CIDR 은 백엔드에서 ip_network 검증된 값이라 주입 위험이 없다.
+          """
+          subprocess.run(["iptables", "-t", "nat", "-N", NAT_CHAIN], capture_output=True, check=False)
+          hooked = subprocess.run(
+              ["iptables", "-t", "nat", "-C", "POSTROUTING", "-j", NAT_CHAIN], capture_output=True, check=False
+          )
+          if hooked.returncode != 0:
+              subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-j", NAT_CHAIN], check=False)
+          subprocess.run(["iptables", "-t", "nat", "-F", NAT_CHAIN], check=False)
+          for cidr in nat_networks:
+              nic = _outbound_nic(cidr)
+              if not nic:
+                  log(f"masquerade: {cidr} 로의 NIC 미발견 — 스킵(다음 주기 재시도)")
+                  continue
+              subprocess.run(
+                  ["iptables", "-t", "nat", "-A", NAT_CHAIN, "-s", tunnel_cidr, "-o", nic, "-j", "MASQUERADE"],
+                  check=False,
+              )
+
+
+      def main() -> int:
+          desired = http_request(DESIRED_STATE_URL, "GET")
+          if desired is not None:
+              write_wg_conf(desired)
+              syncconf()
+              nat_networks = desired.get("nat_networks", []) or []
+              if nat_networks:
+                  bring_up_hotplug_nics()
+              # nat_networks 가 비어도 호출 — 체인을 flush 해 이전 규칙을 정리한다.
+              apply_masquerade(desired.get("tunnel_cidr", "10.8.0.0/24"), nat_networks)
+          else:
+              log("desired-state 조회 실패 — 이번 주기 스킵")
+
+          peers = collect_status()
+          http_request(
+              STATUS_URL,
+              "POST",
+              {"peers": peers, "reported_at": datetime.now(timezone.utc).isoformat()},
+          )
+          return 0
+
+
+      if __name__ == "__main__":
+          sys.exit(main())
+
+  - path: /etc/systemd/system/afterglow-waygate-reconcile.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Waygate reconcile (desired-state sync + status report)
+      After=network-online.target wg-quick@wg0.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/python3 /opt/afterglow/waygate-reconcile.py
+      StandardOutput=journal
+      StandardError=journal
+
+  - path: /etc/systemd/system/afterglow-waygate-reconcile.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Waygate reconcile timer ({{ reconcile_interval_seconds }}s)
+
+      [Timer]
+      OnBootSec=20s
+      OnUnitActiveSec={{ reconcile_interval_seconds }}s
+      AccuracySec=1s
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - sysctl --system
+  - /opt/afterglow/waygate-register.sh
+  - systemctl daemon-reload
+  - systemctl enable --now afterglow-waygate-reconcile.timer

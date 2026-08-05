@@ -1,37 +1,61 @@
 [build-system]
-requires = ["setuptools==83.0.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "waygate"
 version = "0.1.0"
-description = "Headless WireGuard controller for Project Waygate"
+description = "OpenStack-native WireGuard gateway service"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.139.2",
+    "afterglow-crypto @ git+https://github.com/openstack-afterglow/afterglow-crypto.git@aee36e8ea173e486f443fa816de4e6397d11cff2",
+    "fastapi==0.125.0",
+    "uvicorn[standard]==0.39.0",
+    "openstacksdk==3.3.0",
+    "keystoneauth1>=5.12.0",
+    "python-keystoneclient==5.4.0",
+    "jinja2==3.1.6",
+    "pydantic==2.13.4",
     "pydantic-settings==2.14.2",
-    "uvicorn==0.51.0",
-    "qrcode[png]==8.2",
+    "redis[hiredis]==5.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiomysql>=0.2.0",
+    "slowapi>=0.1.9",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-test = [
-    "pytest==9.1.1",
-    "httpx==0.28.1",
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28.1",
+    "fakeredis[lua]>=2.21",
+    "ruff>=0.7.0",
 ]
 
 [project.scripts]
-waygate = "waygate.main:run"
+waygate-api = "waygate.main:run"
+waygate-worker = "waygate.worker:main"
+waygate-migrate = "waygate.scripts.migrate:main"
+waygate-cutover = "waygate.scripts.cutover:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["waygate"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+asyncio_mode = "auto"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.ruff]
+line-length = 120
+target-version = "py312"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B008", "B904", "SIM103", "SIM105", "SIM108"]
 
-[tool.setuptools.package-data]
-waygate = ["migrations/*.sql"]
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B", "SIM", "E402"]
