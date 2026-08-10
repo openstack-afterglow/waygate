@@ -1,8 +1,10 @@
 name: Docker Build & Push
 
 on:
+  pull_request:
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ['v*']
   workflow_dispatch:
 
@@ -11,8 +13,12 @@ env:
   IMAGE_OWNER: ${{ github.repository_owner }}
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   build-and-push:
     name: Build & Push Waygate Images
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,8 +44,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/waygate-api
           tags: |
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
+            type=sha,prefix=sha-
 
       - name: Build and push API
         uses: docker/build-push-action@v5
@@ -56,8 +64,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/waygate-worker
           tags: |
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
+            type=sha,prefix=sha-
 
       - name: Build and push Worker
         uses: docker/build-push-action@v5
