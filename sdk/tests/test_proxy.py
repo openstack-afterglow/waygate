@@ -92,6 +92,24 @@ def _response(status_code=200, *, payload=None, text=""):
             "/v1/servers/server-1/import",
             {"passphrase": "secret", "bundle": {"version": 1}},
         ),
+        ("health", (), {}, "GET", "/v1/health", None),
+        ("resource_policies", (), {}, "GET", "/v1/admin/resource-policies", None),
+        (
+            "resource_policy_catalog",
+            ("waygate.image",),
+            {},
+            "GET",
+            "/v1/admin/resource-policies/catalog/waygate.image",
+            None,
+        ),
+        (
+            "update_resource_policy",
+            ("waygate.image",),
+            {"resource_id": "img-123"},
+            "PUT",
+            "/v1/admin/resource-policies/waygate.image",
+            {"resource_id": "img-123"},
+        ),
     ],
 )
 def test_json_methods_issue_expected_request(method_name, args, kwargs, http_method, path, body):

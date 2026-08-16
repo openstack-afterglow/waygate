@@ -8,8 +8,48 @@ app/models/k3s.py:_NAME_RE.
 
 import ipaddress
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+WaygateServerStatus = Literal["CREATING", "PROVISIONING", "ACTIVE", "DELETING", "DELETED", "ERROR"]
+WaygateNatMode = Literal["snat"]
+WaygateAttachmentStatus = Literal["CREATING", "ACTIVE", "ERROR", "DELETING", "DELETED"]
+
+
+class HealthResponse(BaseModel):
+    """헬스 체크 응답."""
+
+    status: str = "ok"
+
+
+class VersionLink(BaseModel):
+    rel: str
+    href: str
+
+
+class VersionDocument(BaseModel):
+    id: str
+    status: str
+    min_version: str
+    version: str
+    links: list[VersionLink]
+
+
+class RootDiscoveryResponse(BaseModel):
+    versions: list[VersionDocument]
+
+
+class VersionDiscoveryResponse(BaseModel):
+    version: VersionDocument
+
+
+class WaygateServerDeleteResponse(BaseModel):
+    """Waygate 서버 삭제 요청 응답 (202 Accepted)."""
+
+    ok: bool = True
+    status: Literal["DELETING"] = "DELETING"
+
 
 # 이름: 영문/숫자로 시작, 영문·숫자·하이픈·언더스코어만 허용 (k3s CreateK3sClusterRequest와 동일 관례)
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$")
@@ -47,7 +87,7 @@ class WaygateServerInfo(BaseModel):
     id: str
     project_id: str
     name: str
-    status: str
+    status: WaygateServerStatus
     status_reason: str | None = None
     server_vm_id: str | None = None
     endpoint_ip: str | None = None
@@ -158,7 +198,7 @@ class WaygateNetworkAttachCreateRequest(BaseModel):
 
     network_id: str
     subnet_id: str | None = None
-    nat_mode: str = "snat"
+    nat_mode: WaygateNatMode = "snat"
 
     @field_validator("network_id")
     @classmethod
@@ -194,8 +234,8 @@ class WaygateNetworkAttachmentInfo(BaseModel):
     subnet_id: str | None = None
     port_id: str | None = None
     cidr: str | None = None
-    nat_mode: str
-    status: str
+    nat_mode: WaygateNatMode
+    status: WaygateAttachmentStatus
     created_at: str | None = None
     updated_at: str | None = None
 

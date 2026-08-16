@@ -19,6 +19,9 @@ class Proxy(proxy.Proxy):
             return None
         return response.json()
 
+    def health(self):
+        return self._json_request("GET", "/v1/health")
+
     def servers(self):
         return self._json_request("GET", "/v1/servers")
 
@@ -75,3 +78,19 @@ class Proxy(proxy.Proxy):
 
     def import_server(self, server_id, **attrs):
         return self._json_request("POST", f"/v1/servers/{_segment(server_id)}/import", body=attrs)
+
+    def resource_policies(self):
+        return self._json_request("GET", "/v1/admin/resource-policies")
+
+    def resource_policy_catalog(self, policy_key):
+        return self._json_request(
+            "GET",
+            f"/v1/admin/resource-policies/catalog/{_segment(policy_key)}",
+        )
+
+    def update_resource_policy(self, policy_key, **attrs):
+        return self._json_request(
+            "PUT",
+            f"/v1/admin/resource-policies/{_segment(policy_key)}",
+            body=attrs,
+        )

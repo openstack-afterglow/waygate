@@ -58,6 +58,11 @@ async def register_waygate_agent(
     if not server:
         raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
 
+    if body.listen_port_confirm is not None and body.listen_port_confirm != server.get("listen_port"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"에이전트 listen_port 불일치 (기대: {server.get('listen_port')}, 수신: {body.listen_port_confirm})",
+        )
     new_status = "ACTIVE" if server["status"] in ("CREATING", "PROVISIONING", "ACTIVE") else server["status"]
     await waygate_db.update_server_status(
         server_id,

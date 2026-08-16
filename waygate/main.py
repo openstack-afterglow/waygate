@@ -15,6 +15,7 @@ from waygate.api import agent, attachments, clients, migration, resource_policie
 from waygate.cache import close_cache
 from waygate.config import get_settings
 from waygate.db import close_db, init_db
+from waygate.models.schemas import HealthResponse, RootDiscoveryResponse, VersionDiscoveryResponse
 from waygate.rate_limit import limiter
 
 _logger = logging.getLogger(__name__)
@@ -37,7 +38,12 @@ async def lifespan(_app: FastAPI):
         await close_db()
 
 
-app = FastAPI(title="Waygate", version="1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Waygate",
+    description="Waygate WireGuard VPN Gateway Service",
+    version="1.0",
+    lifespan=lifespan,
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -58,21 +64,19 @@ def _version_document(request: Request) -> dict:
     }
 
 
-@app.get("/", include_in_schema=False)
+@app.get("/", response_model=RootDiscoveryResponse)
 async def root_discovery(request: Request):
     return {"versions": [_version_document(request)]}
 
 
-@app.get("/v1/", include_in_schema=False)
+@app.get("/v1/", response_model=VersionDiscoveryResponse)
 async def version_discovery(request: Request):
     return {"version": _version_document(request)}
 
 
-@app.get("/v1/health", include_in_schema=False)
+@app.get("/v1/health", response_model=HealthResponse)
 async def health():
     return {"status": "ok"}
-
-
 
 
 def run() -> None:
