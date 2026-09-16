@@ -266,10 +266,20 @@ def _validate_policy_rows(rows: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _database_identity(url: URL) -> tuple[Any, ...]:
-    return (url.drivername, url.username, url.password, url.host, url.port, url.database, tuple(sorted(url.query.items())))
+    return (
+        url.drivername,
+        url.username,
+        url.password,
+        url.host,
+        url.port,
+        url.database,
+        tuple(sorted(url.query.items())),
+    )
 
 
-async def _fetch_rows(connection: AsyncConnection, spec: TableSpec, *, policies_only: bool = False) -> list[dict[str, Any]]:
+async def _fetch_rows(
+    connection: AsyncConnection, spec: TableSpec, *, policies_only: bool = False
+) -> list[dict[str, Any]]:
     columns = ", ".join(spec.columns)
     suffix = " WHERE policy_key LIKE 'waygate.%'" if policies_only else ""
     result = await connection.execute(text(f"SELECT {columns} FROM {spec.name}{suffix}"))

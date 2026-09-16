@@ -94,9 +94,7 @@ class TestAttachNetworkApi:
     @pytest.mark.asyncio
     async def test_attach_422_on_invalid_network_id(self, api_client):
         _override_token_info()
-        resp = await api_client.post(
-            "/v1/servers/srv-1/networks", json={"network_id": "not-a-uuid; rm -rf /"}
-        )
+        resp = await api_client.post("/v1/servers/srv-1/networks", json={"network_id": "not-a-uuid; rm -rf /"})
         assert resp.status_code == 422
 
     @pytest.mark.asyncio

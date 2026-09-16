@@ -203,9 +203,7 @@ async def test_create_server_record_and_provision_with_full_snapshot():
         patch("waygate.services.store.update_server_status", new=AsyncMock()),
         patch("waygate.services.provisioner._wait_for_active", new=AsyncMock()),
         patch("waygate.services.provisioner._extract_fixed_ip", return_value="10.0.0.5"),
-        patch(
-            "waygate.services.provisioner._allocate_new_fip", new=AsyncMock(return_value=("203.0.113.9", "fip-1"))
-        ),
+        patch("waygate.services.provisioner._allocate_new_fip", new=AsyncMock(return_value=("203.0.113.9", "fip-1"))),
     ):
         await waygate_provisioner.provision_waygate_server("project-1", "server-999", "user-1", "tester")
 

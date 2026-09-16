@@ -176,7 +176,11 @@ async def validate_selection(conn, key: str, resource_id: str | None) -> dict[st
 async def list_policies() -> list[dict[str, Any]]:
     factory = _require_db()
     async with factory() as session:
-        rows = (await session.execute(select(ResourcePolicy).where(ResourcePolicy.policy_key.in_(_SPECS_BY_KEY)))).scalars().all()
+        rows = (
+            (await session.execute(select(ResourcePolicy).where(ResourcePolicy.policy_key.in_(_SPECS_BY_KEY))))
+            .scalars()
+            .all()
+        )
     by_key = {row.policy_key: row for row in rows}
     return [_public(by_key.get(spec.key), spec) for spec in _SPECS]
 
@@ -202,8 +206,8 @@ async def get_policy_snapshot(keys: tuple[str, ...]) -> dict[str, dict[str, str]
     factory = _require_db()
     async with factory() as session:
         rows = (
-            await session.execute(select(ResourcePolicy).where(ResourcePolicy.policy_key.in_(keys)))
-        ).scalars().all()
+            (await session.execute(select(ResourcePolicy).where(ResourcePolicy.policy_key.in_(keys)))).scalars().all()
+        )
     by_key = {row.policy_key: row for row in rows}
     return {
         key: (

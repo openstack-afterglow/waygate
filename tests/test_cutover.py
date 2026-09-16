@@ -26,7 +26,9 @@ def test_table_plan_is_restart_safe_and_rejects_conflicts():
     source = [{"id": "one", "value": {"nested": [1, 2]}}]
 
     assert cutover._plan_table_changes(spec, source, []) == cutover.TablePlan((source[0],))
-    assert cutover._plan_table_changes(spec, source, [{"id": "one", "value": '{"nested":[1,2]}'}]) == cutover.TablePlan(())
+    assert cutover._plan_table_changes(spec, source, [{"id": "one", "value": '{"nested":[1,2]}'}]) == cutover.TablePlan(
+        ()
+    )
 
     with pytest.raises(cutover.CutoverError, match="conflicting records row"):
         cutover._plan_table_changes(spec, source, [{"id": "one", "value": {"nested": [2, 1]}}])

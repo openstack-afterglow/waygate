@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check architecture snapshot
+        run: python3 scripts/check_architecture.py
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.12'
