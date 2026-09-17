@@ -53,6 +53,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: docker/Dockerfile
           target: waygate-api
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-api.outputs.tags }}
@@ -73,6 +74,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: docker/Dockerfile
           target: waygate-worker
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-worker.outputs.tags }}

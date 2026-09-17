@@ -21,8 +21,7 @@ def validate_image_ref(reference: str, *, source_mode: bool) -> None:
     if source_mode:
         if not _LOCAL_SOURCE_REF.fullmatch(reference):
             raise ValueError(
-                "invalid Waygate image reference; "
-                "expected afterglow-local/waygate-{api|worker}:<12-hex-commit>"
+                "invalid Waygate image reference; expected afterglow-local/waygate-{api|worker}:<12-hex-commit>"
             )
         return
 

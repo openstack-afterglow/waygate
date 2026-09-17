@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: '3.12'
           enable-cache: true
-      - run: uv sync --all-extras --frozen
+      - run: uv sync --extra service --extra dev --frozen
       - run: uv run pytest tests
       - run: uv run ruff check .
 

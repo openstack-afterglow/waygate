@@ -6,7 +6,7 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 - Repository: [openstack-afterglow/waygate](https://github.com/openstack-afterglow/waygate)
 - 분석한 branch: `dev`; 분석한 작업 트리의 소스 기준일은 이 문서 작성 시점이다.
-- package versions: `waygate` `0.1.2` (`pyproject.toml`), `waygate-sdk` `0.1.2` (`sdk/pyproject.toml`), `waygate-kolla` `0.1.2` (`deploy/kolla/pyproject.toml`), Python `>=3.12`, FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
+- package versions: root distribution and Python runtime package `waygate` `0.1.3` (`pyproject.toml`, `waygate/__init__.py`); `waygate-sdk` remains `0.1.2` (`sdk/pyproject.toml`). The Kolla role's `waygate_image_tag` remains `0.1.2`, the known published runtime image default. Python `>=3.12`, FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
 - 1분 책임 요약: `waygate-api`는 Keystone 인증·project 소유권·API를, `waygate-worker`는 durable provision/delete job을, MariaDB는 정본 레코드와 암호화 자격증명을, Redis는 상태·토큰의 보조 캐시를 소유한다. 실제 WireGuard private key와 NAT 적용은 게이트웨이 VM의 agent가 소유한다.
 
 ## Development status
@@ -73,7 +73,7 @@ flowchart LR
 | [`waygate/migrations/001_baseline.sql`](waygate/migrations/001_baseline.sql) | baseline DDL | 다섯 주요 테이블과 초기 resource policy row를 생성한다. [`waygate/migrations/manifest.txt`](waygate/migrations/manifest.txt)가 checksum을 고정한다. |
 | [`sdk/waygate_sdk/proxy.py`](sdk/waygate_sdk/proxy.py) | `Proxy` | OpenStack SDK service proxy로 `/v1/servers`, client, network, migration, admin policy API를 호출한다. |
 | [`sdk/waygate_sdk/service.py`](sdk/waygate_sdk/service.py) | `WaygateService` | service type `waygate`, version `1`과 `Proxy`를 SDK에 등록한다. |
-| [`deploy/kolla/pyproject.toml`](deploy/kolla/pyproject.toml) | `waygate-kolla` | Kolla-Ansible 배포 패키지 및 `ansible/roles/waygate/` 매핑. |
+| [`deploy/kolla/ansible/roles/waygate/`](deploy/kolla/ansible/roles/waygate/) | Kolla-Ansible role | root `waygate` wheel의 shared-data로 `share/kolla-ansible/ansible/roles/waygate`에 설치된다. Kolla-Ansible은 이 distribution의 의존성이 아니다. |
 
 의존 방향은 `api → services → db/ORM 또는 OpenStack`이고, `worker → services`다. `sdk`는 HTTP API client이며 서버 runtime의 내부 모듈을 import하지 않는다.
 
@@ -131,7 +131,7 @@ flowchart LR
 
 ### 프로세스와 이미지
 
-`Dockerfile`은 `waygate-runtime`을 만든 뒤 `waygate-api`와 `waygate-worker` target으로 나눈다. API는 `uvicorn waygate.main:app --host 0.0.0.0 --port 8010`, worker는 `python -m waygate.worker`로 시작한다. `pyproject.toml`의 console scripts는 `waygate-api`, `waygate-worker`, `waygate-migrate`, `waygate-cutover`를 제공한다. SDK는 `sdk/` 아래 별도 package와 별도 `uv.lock`을 가진다.
+`docker/Dockerfile`은 `waygate-runtime`을 만든 뒤 `waygate-api`와 `waygate-worker` target으로 나눈다. Builder는 root package의 `service` extra만 설치하므로 role-only wheel 소비자는 service runtime이나 Kolla-Ansible을 받지 않는다. API는 `uvicorn waygate.main:app --host 0.0.0.0 --port 8010`, worker는 `python -m waygate.worker`로 시작한다. `pyproject.toml`의 console scripts는 `waygate-api`, `waygate-worker`, `waygate-migrate`, `waygate-cutover`를 제공한다. SDK는 `sdk/` 아래 별도 package와 별도 `uv.lock`을 가진다.
 
 설정은 `WAYGATE_CONFIG_FILE`이 지정한 TOML 또는 후보 `waygate.conf`에서 읽고, environment가 우선한다. 주요 섹션은 `[keystone]`/`[openstack]`, `[database]`, `[cache]`, `[waygate]`이며 callback base URL, 기본 tunnel CIDR `10.8.0.0/24`, 기본 listen port `51820`, encryption key, trusted proxies를 포함한다. API와 worker 모두 `database.url`이 필요하다. Redis 기본 URL은 `redis://localhost:6379/6`이다.
 
@@ -141,7 +141,7 @@ flowchart LR
 - migration runner는 `schema_migrations` ledger에 logical ID/path/SHA-256/applied time을 기록하며 적용된 identity가 변하면 실패한다. DB schema가 먼저 준비되지 않으면 API/worker는 정상 동작하지 않는다.
 - `/v1/health`의 `{"status":"ok"}`는 프로세스 route가 응답한다는 뜻뿐이다. DB·Redis·Keystone·Neutron·Nova 연결 readiness나 agent 상태를 확인하지 않는다.
 - API/worker Python logging은 stdout/stderr로 수집할 수 있고, cloud-init register/reconcile agent는 `/var/log/waygate-agent.log`와 systemd journal에 기록한다. 운영자는 server status와 Redis의 최근 status report를 함께 확인해야 한다.
-- 현행 CI의 `service` job은 checkout 뒤 architecture check, `uv sync --all-extras --frozen`, `uv run pytest tests`, `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다.
+- 현행 CI의 `service` job은 checkout 뒤 architecture check, `uv sync --extra service --extra dev --frozen`, `uv run pytest tests`, `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다.
 
 ## Security boundaries
 
@@ -162,7 +162,8 @@ flowchart LR
 ### Waygate service
 
 ```sh
-uv sync --all-extras --frozen
+uv sync --extra service --extra dev --frozen
+uv run pytest tests/test_kolla_assets.py -q
 uv run pytest tests/test_waygate_jobs.py tests/test_waygate_provisioner.py tests/test_waygate_agent.py tests/test_waygate_clients.py tests/test_waygate_network.py -q
 uv run pytest tests
 uv run ruff check .
@@ -203,7 +204,7 @@ python3 scripts/check_architecture.py --staged
 | network attachment/NAT | [`waygate/api/attachments.py`](waygate/api/attachments.py), [`waygate/services/network.py`](waygate/services/network.py) | attachment state/CIDR/SNAT limits, `tests/test_waygate_network.py` |
 | resource policy 또는 server snapshot | [`waygate/services/resource_policies.py`](waygate/services/resource_policies.py), [`waygate/api/resource_policies.py`](waygate/api/resource_policies.py) | policy keys/constraints/snapshot 설명, `tests/test_waygate_provisioner.py` |
 | migration/export/import | [`waygate/api/migration.py`](waygate/api/migration.py), [`waygate/services/migration.py`](waygate/services/migration.py) | bundle/key/network recreation limit, `tests/test_waygate_migration.py` |
-| ORM/migration/config/deployment/CI | [`waygate/models/orm.py`](waygate/models/orm.py), [`waygate/migrations/`](waygate/migrations/), [`waygate/config.py`](waygate/config.py), [`Dockerfile`](Dockerfile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | schema/operations/verification sections와 migration ledger, CI/architecture hook |
+| ORM/migration/config/deployment/CI | [`waygate/models/orm.py`](waygate/models/orm.py), [`waygate/migrations/`](waygate/migrations/), [`waygate/config.py`](waygate/config.py), [`docker/Dockerfile`](docker/Dockerfile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | schema/operations/verification sections와 migration ledger, CI/architecture hook |
 | SDK path/method | [`sdk/waygate_sdk/proxy.py`](sdk/waygate_sdk/proxy.py), [`sdk/waygate_sdk/service.py`](sdk/waygate_sdk/service.py) | SDK contract와 [`sdk/tests/test_proxy.py`](sdk/tests/test_proxy.py) |
 | bugfix/refactor with no topology change | 실제 변경 source와 영향받은 test | 구조 영향이 없다는 이유를 Maintenance review summary에 남기고 source digest를 다시 stamp한다. |
 
@@ -229,9 +230,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "9ef322914ec730ce91a5842846d7e4e7c82c609d2632a478cb20773dc1159029",
-  "reviewed_at": "2026-09-17T09:26:52Z",
-  "summary": "Add deploy/kolla waygate-kolla packaging and bump to 0.1.2"
+  "source_sha256": "6bcfdf28673f5e3339237b7f0b34fc9f1ac7563ba85995f7710c7a008c631980",
+  "reviewed_at": "2026-09-17T15:44:47Z",
+  "summary": "Root package migration: shared-data Kolla role, docker/Dockerfile root context, transferred validator and role contracts from afterglow. Guard interpreter fix for system python3.9. 243 tests pass."
 }
 ```
 <!-- architecture-review:end -->

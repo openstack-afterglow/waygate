@@ -10,8 +10,6 @@ from pathlib import Path
 import jinja2
 import yaml
 
-from waygate import __version__ as app_version
-
 REPO_ROOT = Path(__file__).parent.parent
 KOLLA_DIR = REPO_ROOT / "deploy" / "kolla"
 ROLE_DIR = KOLLA_DIR / "ansible" / "roles" / "waygate"
@@ -19,8 +17,9 @@ ROLE_DIR = KOLLA_DIR / "ansible" / "roles" / "waygate"
 
 def test_kolla_required_assets_exist():
     assert KOLLA_DIR.exists()
-    assert (KOLLA_DIR / "pyproject.toml").exists()
-    assert (KOLLA_DIR / "src" / "waygate_kolla" / "__init__.py").exists()
+    assert ROLE_DIR.is_dir()
+    assert not (KOLLA_DIR / "pyproject.toml").exists()
+    assert not (KOLLA_DIR / "src" / "waygate_kolla" / "__init__.py").exists()
 
     required_role_files = [
         "defaults/main.yml",
@@ -52,14 +51,23 @@ def test_kolla_required_assets_exist():
         assert path.exists(), f"Missing required role asset: {relative_path}"
 
 
-def test_version_lockstep_and_metadata():
-    pyproject_data = tomllib.loads((KOLLA_DIR / "pyproject.toml").read_text(encoding="utf-8"))
-    assert pyproject_data["project"]["name"] == "waygate-kolla"
-    assert pyproject_data["project"]["requires-python"] == ">=3.11"
-    assert pyproject_data["tool"]["hatch"]["version"]["path"] == "../../waygate/__init__.py"
+def test_root_package_metadata_and_image_default():
+    pyproject_data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = pyproject_data["project"]
+    service_dependencies = project["optional-dependencies"]["service"]
+
+    assert project["name"] == "waygate"
+    assert project["version"] == "0.1.3"
+    assert project["requires-python"] == ">=3.12"
+    assert "dependencies" not in project
+    assert "ansible" not in "\n".join(service_dependencies).lower()
+    assert "fastapi==0.125.0" in service_dependencies
+    assert pyproject_data["tool"]["hatch"]["build"]["targets"]["wheel"]["shared-data"] == {
+        "deploy/kolla/ansible/roles/waygate": "share/kolla-ansible/ansible/roles/waygate"
+    }
 
     defaults_yaml = yaml.safe_load((ROLE_DIR / "defaults" / "main.yml").read_text(encoding="utf-8"))
-    assert defaults_yaml["waygate_image_tag"] == app_version
+    assert defaults_yaml["waygate_image_tag"] == "0.1.2"
 
 
 def test_all_yaml_files_parse():
@@ -68,6 +76,7 @@ def test_all_yaml_files_parse():
         parsed = yaml.safe_load(content)
         assert parsed is not None or yml_file.name == "main.yml", f"YAML file parsed to None or empty: {yml_file}"
 
+
 def test_jinja_templates_compile():
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
     for template_file in (ROLE_DIR / "templates").glob("*.j2"):
@@ -75,13 +84,14 @@ def test_jinja_templates_compile():
         assert env.parse(content) is not None
 
 
-def test_waygate_kolla_wheel_build_and_install(tmp_path: Path):
+def test_root_wheel_build_and_install_includes_kolla_role(tmp_path: Path):
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
+    project_version = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 
     res = subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", str(dist_dir)],
-        cwd=KOLLA_DIR,
+        cwd=REPO_ROOT,
         capture_output=True,
         text=True,
     )
@@ -90,13 +100,24 @@ def test_waygate_kolla_wheel_build_and_install(tmp_path: Path):
     wheels = list(dist_dir.glob("*.whl"))
     assert len(wheels) == 1
     wheel_path = wheels[0]
-    assert f"waygate_kolla-{app_version}" in wheel_path.name
+    assert f"waygate-{project_version}" in wheel_path.name
 
     with zipfile.ZipFile(wheel_path, "r") as zf:
         namelist = zf.namelist()
-        data_prefix = f"waygate_kolla-{app_version}.data/data/share/kolla-ansible/ansible/roles/waygate/"
-        role_files = [n for n in namelist if n.startswith(data_prefix)]
-        assert len(role_files) > 0, "No shared-data role files found in wheel"
+        data_prefix = f"waygate-{project_version}.data/data/share/kolla-ansible/ansible/roles/waygate/"
+        role_files = [name for name in namelist if name.startswith(data_prefix)]
+        assert role_files, "No shared-data role files found in wheel"
+        assert any(name.endswith("defaults/main.yml") for name in role_files)
+        assert any(name.endswith("tasks/main.yml") for name in role_files)
+        assert any(name.endswith("templates/waygate.conf.j2") for name in role_files)
+
+        metadata_member = next(name for name in namelist if name.endswith(".dist-info/METADATA"))
+        metadata = zf.read(metadata_member).decode("utf-8")
+        requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist:")]
+        assert requires_dist
+        assert all("; extra ==" in requirement for requirement in requires_dist)
+        assert "Requires-Dist: fastapi==0.125.0; extra == 'service'" in metadata
+        assert "ansible" not in metadata.lower()
 
     venv_dir = tmp_path / "venv"
     res_venv = subprocess.run(["uv", "venv", str(venv_dir)], capture_output=True, text=True)
@@ -115,9 +136,8 @@ def test_waygate_kolla_wheel_build_and_install(tmp_path: Path):
     assert (installed_role / "tasks" / "main.yml").is_file()
     assert (installed_role / "templates" / "waygate.conf.j2").is_file()
 
-    # Verify clean uninstall
     res_uninst = subprocess.run(
-        ["uv", "pip", "uninstall", "--python", str(venv_python), "waygate-kolla"],
+        ["uv", "pip", "uninstall", "--python", str(venv_python), "waygate"],
         capture_output=True,
         text=True,
     )
