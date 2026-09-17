@@ -1,7 +1,7 @@
 ---
 # Waygate kolla role defaults
 
-waygate_image_tag: "0.1.1"
+waygate_image_tag: "0.1.2"
 waygate_image_namespace: "ghcr.io/openstack-afterglow"
 waygate_api_image: "{{ waygate_image_namespace }}/waygate-api"
 waygate_worker_image: "{{ waygate_image_namespace }}/waygate-worker"

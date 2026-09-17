@@ -6,7 +6,7 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 - Repository: [openstack-afterglow/waygate](https://github.com/openstack-afterglow/waygate)
 - 분석한 branch: `dev`; 분석한 작업 트리의 소스 기준일은 이 문서 작성 시점이다.
-- package versions: `waygate` `0.1.0` (`pyproject.toml`), `waygate-sdk` `0.1.0` (`sdk/pyproject.toml`), Python `>=3.12`, FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
+- package versions: `waygate` `0.1.2` (`pyproject.toml`), `waygate-sdk` `0.1.2` (`sdk/pyproject.toml`), `waygate-kolla` `0.1.2` (`deploy/kolla/pyproject.toml`), Python `>=3.12`, FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
 - 1분 책임 요약: `waygate-api`는 Keystone 인증·project 소유권·API를, `waygate-worker`는 durable provision/delete job을, MariaDB는 정본 레코드와 암호화 자격증명을, Redis는 상태·토큰의 보조 캐시를 소유한다. 실제 WireGuard private key와 NAT 적용은 게이트웨이 VM의 agent가 소유한다.
 
 ## Development status
@@ -73,6 +73,7 @@ flowchart LR
 | [`waygate/migrations/001_baseline.sql`](waygate/migrations/001_baseline.sql) | baseline DDL | 다섯 주요 테이블과 초기 resource policy row를 생성한다. [`waygate/migrations/manifest.txt`](waygate/migrations/manifest.txt)가 checksum을 고정한다. |
 | [`sdk/waygate_sdk/proxy.py`](sdk/waygate_sdk/proxy.py) | `Proxy` | OpenStack SDK service proxy로 `/v1/servers`, client, network, migration, admin policy API를 호출한다. |
 | [`sdk/waygate_sdk/service.py`](sdk/waygate_sdk/service.py) | `WaygateService` | service type `waygate`, version `1`과 `Proxy`를 SDK에 등록한다. |
+| [`deploy/kolla/pyproject.toml`](deploy/kolla/pyproject.toml) | `waygate-kolla` | Kolla-Ansible 배포 패키지 및 `ansible/roles/waygate/` 매핑. |
 
 의존 방향은 `api → services → db/ORM 또는 OpenStack`이고, `worker → services`다. `sdk`는 HTTP API client이며 서버 runtime의 내부 모듈을 import하지 않는다.
 
@@ -228,9 +229,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "3b99103e1172dba59abcacc346c1026aefcad0e6c4fb9884f20390fbd0a76a08",
-  "reviewed_at": "2026-09-16T17:20:30Z",
-  "summary": "test"
+  "source_sha256": "9ef322914ec730ce91a5842846d7e4e7c82c609d2632a478cb20773dc1159029",
+  "reviewed_at": "2026-09-17T09:26:52Z",
+  "summary": "Add deploy/kolla waygate-kolla packaging and bump to 0.1.2"
 }
 ```
 <!-- architecture-review:end -->
