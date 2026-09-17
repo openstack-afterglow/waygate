@@ -1,0 +1,24 @@
+---
+- name: Keystone | Register Waygate service, project, and user
+  ansible.builtin.import_role:
+    name: service-ks-register
+  vars:
+    project_name: waygate
+    service_ks_register_auth: "{{ openstack_auth }}"
+    service_ks_register_services:
+      - name: waygate
+        type: waygate
+        description: "Waygate WireGuard gateway service"
+        endpoints:
+          - interface: public
+            url: "{{ waygate_public_endpoint_url }}"
+          - interface: internal
+            url: "{{ waygate_internal_endpoint_url }}"
+          - interface: admin
+            url: "{{ waygate_admin_endpoint_url }}"
+    service_ks_register_users:
+      - project: "{{ waygate_service_project_name }}"
+        user: "{{ waygate_keystone_user }}"
+        password: "{{ waygate_keystone_password }}"
+        role: admin
+  no_log: true

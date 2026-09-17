@@ -1,0 +1,45 @@
+---
+- name: Precheck | Verify enable_waygate is set
+  ansible.builtin.assert:
+    that:
+      - enable_waygate is defined
+    fail_msg: "enable_waygate must be set in globals.yml"
+  run_once: true
+  tags: precheck
+
+- name: Precheck | Verify stock Kolla Valkey dependency
+  ansible.builtin.assert:
+    that:
+      - enable_valkey | default(false) | bool
+      - groups.get('valkey', []) | length > 0
+      - valkey_master_password is defined and valkey_master_password | length > 0
+    fail_msg: "Deploy stock Kolla Valkey before enabling waygate; no plugin Redis fallback exists"
+  run_once: true
+  tags: precheck
+  when: enable_waygate | default(false) | bool
+
+- name: Precheck | Check required Waygate secrets
+  ansible.builtin.assert:
+    that:
+      - waygate_database_password is defined and waygate_database_password | length > 0
+      - waygate_keystone_password is defined and waygate_keystone_password | length > 0
+      - waygate_encryption_key is defined and waygate_encryption_key | length == 64
+      - waygate_encryption_key == afterglow_kubeconfig_encryption_key
+    fail_msg: "Waygate DB/Keystone secrets must be set, and its encryption key must equal afterglow_kubeconfig_encryption_key during cutover"
+  tags: precheck
+  when: enable_waygate | bool
+
+- name: Precheck | Validate Waygate public route hostname
+  ansible.builtin.assert:
+    that:
+      - waygate_public_haproxy_fqdn is match('^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$')
+      - (waygate_public_endpoint_url | regex_replace('/$', '')) == ('https://' ~ waygate_public_haproxy_fqdn)
+    fail_msg: "waygate_public_endpoint_url must be the HTTPS origin for waygate_public_haproxy_fqdn"
+  run_once: true
+  tags: precheck
+  when:
+    - enable_waygate | bool
+    - waygate_public_haproxy_enabled | bool
+
+- name: Include Waygate image precheck tasks
+  ansible.builtin.include_tasks: image_precheck.yml

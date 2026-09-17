@@ -1,0 +1,8 @@
+---
+- name: Destroy | Stop and remove Waygate containers
+  become: true
+  community.docker.docker_container:
+    name: "{{ item.value.container_name }}"
+    state: absent
+  loop: "{{ waygate_services | dict2items }}"
+  when: inventory_hostname in groups['waygate']

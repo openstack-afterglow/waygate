@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "waygate-kolla"
+dynamic = ["version"]
+description = "Waygate Kolla-Ansible roles and packaging"
+requires-python = ">=3.11"
+dependencies = [
+    "kolla-ansible>=21,<22",
+]
+
+[tool.hatch.version]
+path = "../../waygate/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/waygate_kolla"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"ansible/roles/waygate" = "share/kolla-ansible/ansible/roles/waygate"

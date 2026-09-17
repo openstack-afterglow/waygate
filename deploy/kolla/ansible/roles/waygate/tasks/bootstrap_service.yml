@@ -1,0 +1,31 @@
+---
+- name: Bootstrap | Pull Waygate API image for migration
+  become: true
+  community.docker.docker_image:
+    name: "{{ waygate_api_image_ref }}"
+    source: pull
+    force_source: "{{ waygate_image_tag == 'latest' }}"
+  run_once: true
+  delegate_to: "{{ groups['waygate'] | first }}"
+  when: not (waygate_source_mode | default(false) | bool)
+
+- name: Bootstrap | Apply Waygate database migrations
+  become: true
+  community.docker.docker_container:
+    name: waygate_bootstrap
+    image: "{{ waygate_api_image_ref }}"
+    command: ["python", "-m", "waygate.scripts.migrate", "--apply"]
+    state: started
+    detach: false
+    cleanup: true
+    network_mode: host
+    volumes:
+      - "{{ waygate_config_dir }}/waygate.conf:/app/waygate.conf:ro"
+    env:
+      DATABASE_URL: "{{ waygate_database_url }}"
+      REDIS_URL: "{{ waygate_redis_url }}"
+      WAYGATE_ENCRYPTION_KEY: "{{ waygate_encryption_key }}"
+  no_log: true
+  register: waygate_bootstrap_result
+  run_once: true
+  delegate_to: "{{ groups['waygate'] | first }}"
