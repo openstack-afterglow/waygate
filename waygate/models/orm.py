@@ -179,7 +179,6 @@ class WaygateJob(Base):
     __table_args__ = (Index("idx_waygate_jobs_claim", "status", "created_at"),)
 
 
-
 class ResourcePolicy(Base):
     """Global admin-owned selection of a discovered OpenStack resource."""
 
@@ -195,4 +194,3 @@ class ResourcePolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = (Index("idx_resource_policies_kind", "resource_kind"),)
-

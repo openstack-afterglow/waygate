@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request, Security
+from fastapi.security import APIKeyHeader
 from keystoneauth1 import session as ks_session
 from keystoneauth1.identity import v3
 
@@ -13,6 +14,13 @@ from waygate.config import get_settings
 
 _logger = logging.getLogger(__name__)
 _admin_role_id_cache: str | None = None
+
+keystone_token_header = APIKeyHeader(
+    name="X-Auth-Token",
+    scheme_name="KeystoneToken",
+    auto_error=False,
+    description="Keystone authentication token",
+)
 
 
 def _get_admin_ks_client():
@@ -86,7 +94,7 @@ def validate_token(token: str, project_id: str = "") -> dict:
 
 async def require_token(
     request: Request,
-    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+    x_auth_token: str | None = Security(keystone_token_header),
     x_project_id: str | None = Header(default=None, alias="X-Project-Id"),
 ) -> dict:
     if not x_auth_token:

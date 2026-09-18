@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock LICENSE ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --extra service
 
 COPY waygate/ ./waygate/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra service
 
 FROM python:3.12-slim AS waygate-runtime
 

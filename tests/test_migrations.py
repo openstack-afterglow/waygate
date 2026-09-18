@@ -5,9 +5,7 @@ from waygate.scripts import migrate
 
 def test_manifest_covers_checksum_verified_baseline():
     migrations = migrate.load_manifest()
-    assert [(item.logical_id, item.relative_path) for item in migrations] == [
-        ("001_baseline", "001_baseline.sql")
-    ]
+    assert [(item.logical_id, item.relative_path) for item in migrations] == [("001_baseline", "001_baseline.sql")]
 
 
 def test_baseline_statements_are_idempotent_and_complete():

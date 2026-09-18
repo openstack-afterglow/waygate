@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: waygate
+  author: openstack-afterglow
+  description: Waygate WireGuard gateway service deployment role for kolla-ansible
+  min_ansible_version: "2.14"
+
+dependencies: []

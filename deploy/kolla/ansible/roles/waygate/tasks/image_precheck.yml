@@ -1,0 +1,36 @@
+---
+- name: Image precheck | Validate enabled Waygate image references
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ role_path }}/files/validate_image_ref.py"
+      - "{{ item.value.image }}"
+      - "{{ waygate_source_mode | default(false) | bool | lower }}"
+  changed_when: false
+  loop: "{{ waygate_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  run_once: true
+  delegate_to: "{{ groups['deployment'][0] }}"
+  when:
+    - enable_waygate | bool
+    - item.value.enabled | bool
+
+- name: Image precheck | Inspect enabled remote Waygate image manifests
+  become: true
+  ansible.builtin.command:
+    argv:
+      - docker
+      - manifest
+      - inspect
+      - "{{ item.value.image }}"
+  changed_when: false
+  loop: "{{ waygate_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  run_once: true
+  delegate_to: "{{ groups['waygate'] | first }}"
+  when:
+    - enable_waygate | bool
+    - item.value.enabled | bool
+    - not (waygate_source_mode | default(false) | bool)

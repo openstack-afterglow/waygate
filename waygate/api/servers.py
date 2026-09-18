@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from waygate.auth import require_token
 from waygate.config import get_settings
 from waygate.db import is_db_available
-from waygate.models.schemas import WaygateServerCreateRequest, WaygateServerInfo
+from waygate.models.schemas import WaygateServerCreateRequest, WaygateServerDeleteResponse, WaygateServerInfo
 from waygate.services import waygate_agent_auth, waygate_db, waygate_jobs
 
 router = APIRouter()
@@ -104,7 +104,7 @@ async def get_waygate_server(server_id: str, token_info: dict = Depends(require_
     return await _merge_status(server)
 
 
-@router.delete("/{server_id}", status_code=202)
+@router.delete("/{server_id}", status_code=202, response_model=WaygateServerDeleteResponse)
 async def delete_waygate_server_endpoint(server_id: str, token_info: dict = Depends(require_token)):
     _require_db()
     project_id = token_info["project_id"]

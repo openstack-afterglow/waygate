@@ -170,6 +170,34 @@ class TestAgentRegisterHappyPath:
         )
         assert resp.status_code == 422
 
+    @pytest.mark.asyncio
+    async def test_register_with_matching_listen_port_confirm_succeeds(self, api_client):
+        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        with patch("waygate.api.agent.waygate_db") as mock_db:
+            mock_db.get_server_by_id = AsyncMock(return_value=_server_record(status="CREATING", listen_port=51820))
+            mock_db.update_server_status = AsyncMock()
+            resp = await api_client.post(
+                "/v1/servers/server-1/agent/register",
+                json={"public_key": "A" * 43 + "=", "listen_port_confirm": 51820},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert resp.status_code == 204
+        mock_db.update_server_status.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_register_with_mismatched_listen_port_confirm_fails_closed(self, api_client):
+        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        with patch("waygate.api.agent.waygate_db") as mock_db:
+            mock_db.get_server_by_id = AsyncMock(return_value=_server_record(status="CREATING", listen_port=51820))
+            mock_db.update_server_status = AsyncMock()
+            resp = await api_client.post(
+                "/v1/servers/server-1/agent/register",
+                json={"public_key": "A" * 43 + "=", "listen_port_confirm": 51821},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert resp.status_code == 409
+        mock_db.update_server_status.assert_not_called()
+
 
 class TestAgentDesiredStateHappyPath:
     @pytest.mark.asyncio

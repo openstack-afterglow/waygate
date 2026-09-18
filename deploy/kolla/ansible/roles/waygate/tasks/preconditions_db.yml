@@ -1,0 +1,31 @@
+---
+- name: DB | Create Waygate database
+  kolla_toolbox:
+    container_engine: "{{ kolla_container_engine }}"
+    module_name: mysql_db
+    module_args:
+      login_host: "{{ waygate_database_address }}"
+      login_port: "{{ waygate_database_port }}"
+      login_user: "{{ waygate_database_admin_user }}"
+      login_password: "{{ waygate_database_admin_password }}"
+      name: "{{ waygate_database_name }}"
+  run_once: true
+  delegate_to: "{{ groups['waygate'][0] }}"
+
+- name: DB | Create Waygate database user
+  kolla_toolbox:
+    container_engine: "{{ kolla_container_engine }}"
+    module_name: mysql_user
+    module_args:
+      login_host: "{{ waygate_database_address }}"
+      login_port: "{{ waygate_database_port }}"
+      login_user: "{{ waygate_database_admin_user }}"
+      login_password: "{{ waygate_database_admin_password }}"
+      name: "{{ waygate_database_user }}"
+      password: "{{ waygate_database_password }}"
+      host: "%"
+      priv: "{{ waygate_database_name }}.*:ALL"
+      state: present
+  run_once: true
+  delegate_to: "{{ groups['waygate'][0] }}"
+  no_log: true

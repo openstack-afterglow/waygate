@@ -120,6 +120,7 @@ async def create_server_record(project_id: str, server_id: str, data: dict) -> N
         add_server_record(session, project_id, server_id, data)
         await session.commit()
 
+
 async def get_server(project_id: str, server_id: str) -> dict | None:
     """소유권 검증 포함 단일 서버 조회. project_id 불일치 시 None (IDOR 방어)."""
     factory = get_session_factory()
