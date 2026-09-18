@@ -230,9 +230,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "6bcfdf28673f5e3339237b7f0b34fc9f1ac7563ba85995f7710c7a008c631980",
-  "reviewed_at": "2026-09-17T15:44:47Z",
-  "summary": "Root package migration: shared-data Kolla role, docker/Dockerfile root context, transferred validator and role contracts from afterglow. Guard interpreter fix for system python3.9. 243 tests pass."
+  "source_sha256": "14443e364862111ea7a948fae8c9192d8e5f868451a0dec4da1ef12436518764",
+  "reviewed_at": "2026-09-18T23:20:29Z",
+  "summary": "Relax requires-python to >=3.11 for Kolla control node compatibility; bump afterglow-crypto service pin to the matching >=3.11 commit"
 }
 ```
 <!-- architecture-review:end -->
