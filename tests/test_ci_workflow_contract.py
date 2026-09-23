@@ -1,8 +1,14 @@
 """CI shape contract (AGENTS.md "CI 파이프라인 성능 규정" rules 3, 7, 9, 10, 11).
 
 These tests pin the workflow invariants that the CI performance changes rely on:
-one test execution per SHA and event, image builds gated by the test result,
-PR image builds that never publish, and an explicit pytest-xdist worker count.
+one test execution per pushed ref or PR sync (a release tag push re-tests the SHA
+its branch push already tested), image publishing gated by the test result, PR
+image builds that never publish or log in, and an explicit pytest-xdist worker count.
+
+The contract runs only inside ci.yml. A PR that removes or narrows ci.yml's own
+pull_request trigger therefore runs no tests before merge; the regression shows up
+on the next branch push, where Docker Build & Push's test job fails and blocks the
+image. actionlint is a local check and is not run by any workflow.
 """
 
 from __future__ import annotations
@@ -20,10 +26,37 @@ BUILD_GATE = (
     "(github.event_name == 'pull_request' && needs.test.result == 'skipped')) }}"
 )
 NO_PUSH_ON_PR = "${{ github.event_name != 'pull_request' }}"
+SKIP_ON_PR = "github.event_name != 'pull_request'"
+PUBLISH_ACTIONS = ("docker/login-action", "docker/build-push-action", "docker/bake-action")
+PUBLISH_COMMANDS = ("docker push", "--push", "imagetools create")
 
 
 def _load(name: str) -> dict:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+
+
+def _workflow_paths() -> list[Path]:
+    # GitHub runs both extensions; a `.yaml` workflow must not escape these checks.
+    return sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
+
+
+def _needs(job: dict) -> list[str]:
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _step_publishes(step: dict) -> bool:
+    uses = str(step.get("uses", ""))
+    if uses.startswith("docker/login-action"):
+        return True
+    if uses.startswith(("docker/build-push-action", "docker/bake-action")):
+        options = step.get("with") or {}
+        # `push` defaults to false; anything else (true, an expression) can publish.
+        if options.get("push", False) not in (False, "false"):
+            return True
+        outputs = str(options.get("outputs", "")) + str(options.get("set", ""))
+        return "push=true" in outputs or "type=registry" in outputs
+    return any(command in str(step.get("run", "")) for command in PUBLISH_COMMANDS)
 
 
 def _triggers(workflow: dict) -> dict:
@@ -83,6 +116,39 @@ def test_pull_request_image_builds_never_push():
         assert step["with"]["push"] == NO_PUSH_ON_PR
 
 
+def test_every_publishing_job_is_gated_by_tests():
+    # `push: ${{ github.event_name != 'pull_request' }}` is true on push and tag
+    # events, so it is the publish path and needs the gate, not an exemption.
+    publishing = []
+    for path in _workflow_paths():
+        for name, job in (yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"] or {}).items():
+            if not any(_step_publishes(step) for step in job.get("steps", [])):
+                continue
+            publishing.append(f"{path.name}:{name}")
+            assert "test" in _needs(job), f"{path.name}:{name}"
+            assert job.get("if") == BUILD_GATE, f"{path.name}:{name}"
+
+    assert publishing == ["docker-build.yml:build-and-push"]
+
+
+def test_pull_request_image_builds_never_log_in_to_the_registry():
+    build = _load("docker-build.yml")["jobs"]["build-and-push"]
+    login_steps = [step for step in build["steps"] if str(step.get("uses", "")).startswith("docker/login-action")]
+
+    assert len(login_steps) == 1
+    assert login_steps[0].get("if") == SKIP_ON_PR
+
+
+def test_ci_failures_are_never_masked_by_continue_on_error():
+    # With continue-on-error a failing test still reports needs.test.result ==
+    # 'success', which would publish push/tag images. Reject the key whatever its value.
+    for name, job in _load("ci.yml")["jobs"].items():
+        assert "continue-on-error" not in job, f"ci.yml:{name}"
+        for index, step in enumerate(job.get("steps", [])):
+            assert "continue-on-error" not in step, f"ci.yml:{name}:step{index}"
+    assert "continue-on-error" not in _load("docker-build.yml")["jobs"]["test"]
+
+
 def test_ci_jobs_run_in_parallel_without_gate_jobs():
     jobs = _load("ci.yml")["jobs"]
 
@@ -114,7 +180,9 @@ def test_serial_pytest_entrypoint_stays_valid():
 
 
 def test_no_workflow_uses_self_hosted_runners():
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    paths = _workflow_paths()
+    assert {path.name for path in paths} >= {"ci.yml", "docker-build.yml"}
+    for path in paths:
         for name, job in yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"].items():
             if "uses" in job:
                 continue
