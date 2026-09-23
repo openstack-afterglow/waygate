@@ -11,7 +11,7 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 ## Development status
 
-상태와 검증 수준은 서로 다른 축이다. 2026-09-08 `uv run pytest tests`에서 223건과 architecture guard focused 13건이 통과했다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
+상태와 검증 수준은 서로 다른 축이다. 2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 253건(architecture guard 13건, CI 형태 계약 10건 포함)을 통과했다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
 
 | 기능 | Implementation | Verification evidence | Current limit | Source |
 |---|---|---|---|---|
@@ -141,7 +141,9 @@ flowchart LR
 - migration runner는 `schema_migrations` ledger에 logical ID/path/SHA-256/applied time을 기록하며 적용된 identity가 변하면 실패한다. DB schema가 먼저 준비되지 않으면 API/worker는 정상 동작하지 않는다.
 - `/v1/health`의 `{"status":"ok"}`는 프로세스 route가 응답한다는 뜻뿐이다. DB·Redis·Keystone·Neutron·Nova 연결 readiness나 agent 상태를 확인하지 않는다.
 - API/worker Python logging은 stdout/stderr로 수집할 수 있고, cloud-init register/reconcile agent는 `/var/log/waygate-agent.log`와 systemd journal에 기록한다. 운영자는 server status와 Redis의 최근 status report를 함께 확인해야 한다.
-- 현행 CI의 `service` job은 checkout 뒤 architecture check, `uv sync --extra service --extra dev --frozen`, `uv run pytest tests`, `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml)(`CI`)은 `pull_request`(main, dev)와 `workflow_call`로만 실행되며 `push` trigger가 없다. `service` job은 checkout 뒤 첫 step으로 architecture check를 하고 `uv sync --extra service --extra dev --frozen`, `uv run pytest tests -n 4 --dist worksteal`(dev extra의 pytest-xdist, public `ubuntu-latest` 4 vCPU에 맞춘 고정 워커 수), `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다. 두 job 사이에 `needs`는 없다.
+- [`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml)(`Docker Build & Push`)은 push(main, dev), tag `v*`, `pull_request`(main, dev), `workflow_dispatch`로 실행된다. push/tag/dispatch에서는 `test` job이 `ci.yml`을 호출하는 SHA당 유일한 테스트 실행이고, `build-and-push`는 `needs: test`와 `needs.test.result == 'success'`일 때만 API/worker 이미지를 빌드해 GHCR에 push한다. pull_request에서는 CI 자체의 pull_request run이 같은 merge ref에서 같은 `ci.yml`을 실행하므로 `test` job을 건너뛰고, 이미지 빌드는 테스트를 기다리지 않고 실행하되 push하지 않는다(`push: ${{ github.event_name != 'pull_request' }}`). 따라서 push commit의 check 이름은 `Docker Build & Push / test / ...`이고, PR에는 `CI / ...` check와 no-push 이미지 빌드 check가 붙는다.
+- [`tests/test_ci_workflow_contract.py`](tests/test_ci_workflow_contract.py)가 trigger 집합, 두 워크플로우의 `pull_request` 설정 동일성, dedup `if:`, 빌드 게이팅 식, PR 빌드 no-push, xdist 워커 수, 직렬 entrypoint 유지, `ubuntu-latest` 전용 runner를 고정한다. CI 성능 규정과 기록된 기준 수치는 [`AGENTS.md`](AGENTS.md)의 `CI 파이프라인 성능 규정`에 있다.
 
 ## Security boundaries
 
@@ -157,7 +159,7 @@ flowchart LR
 
 ## Development and verification
 
-2026-09-08 `uv run pytest tests`는 223건을 통과했고 `tests/test_architecture_guard.py` focused 13건과 guard 파일 lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
+2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 `uv run pytest tests`와 `uv run pytest tests -n 4 --dist worksteal`이 각각 253건을 통과했다(직렬 약 9.3초, 4 워커 약 4.0초의 로컬 측정이며 CI 측정값이 아니다). focused boundary 98건, Kolla assets 5건, `uv run ruff check .`, SDK 21건과 SDK lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
 
 ### Waygate service
 
@@ -166,10 +168,12 @@ uv sync --extra service --extra dev --frozen
 uv run pytest tests/test_kolla_assets.py -q
 uv run pytest tests/test_waygate_jobs.py tests/test_waygate_provisioner.py tests/test_waygate_agent.py tests/test_waygate_clients.py tests/test_waygate_network.py -q
 uv run pytest tests
+uv run pytest tests -n 4 --dist worksteal
+uv run pytest tests/test_ci_workflow_contract.py -q
 uv run ruff check .
 ```
 
-`tests/test_waygate_jobs.py`는 transaction/lease/retry/중복 delete를, `tests/test_waygate_provisioner.py`는 persisted policy snapshot과 VM userdata를, `tests/test_waygate_agent.py`는 bearer fail-closed/register/desired-state/status와 token durability를, `tests/test_waygate_clients.py`는 key/config/project ownership/IPAM을, `tests/test_waygate_network.py`는 attach/detach/SNAT contract를 정의한다. `tests/test_waygate_openapi.py`, `tests/test_waygate_feature_flag.py`, `tests/test_waygate_security.py`, `tests/test_waygate_migration.py`, `tests/test_migrations.py`는 discovery/security/migration/schema 경계를 추가로 정의한다. 실제 OpenStack, MariaDB, Redis, VM timer, WireGuard, KVM 실행은 별도 운영 전제조건이다.
+직렬 `uv run pytest tests`가 기본 entrypoint이고, CI는 같은 테스트를 pytest-xdist 4 워커로 실행한다. xdist 옵션은 `pyproject.toml`의 `addopts`가 아니라 `ci.yml`에만 있으므로 두 명령은 같은 테스트 수를 수집해야 한다. `tests/test_waygate_jobs.py`는 transaction/lease/retry/중복 delete를, `tests/test_waygate_provisioner.py`는 persisted policy snapshot과 VM userdata를, `tests/test_waygate_agent.py`는 bearer fail-closed/register/desired-state/status와 token durability를, `tests/test_waygate_clients.py`는 key/config/project ownership/IPAM을, `tests/test_waygate_network.py`는 attach/detach/SNAT contract를 정의한다. `tests/test_waygate_openapi.py`, `tests/test_waygate_feature_flag.py`, `tests/test_waygate_security.py`, `tests/test_waygate_migration.py`, `tests/test_migrations.py`는 discovery/security/migration/schema 경계를 추가로 정의한다. 실제 OpenStack, MariaDB, Redis, VM timer, WireGuard, KVM 실행은 별도 운영 전제조건이다.
 
 ### SDK
 
@@ -204,7 +208,7 @@ python3 scripts/check_architecture.py --staged
 | network attachment/NAT | [`waygate/api/attachments.py`](waygate/api/attachments.py), [`waygate/services/network.py`](waygate/services/network.py) | attachment state/CIDR/SNAT limits, `tests/test_waygate_network.py` |
 | resource policy 또는 server snapshot | [`waygate/services/resource_policies.py`](waygate/services/resource_policies.py), [`waygate/api/resource_policies.py`](waygate/api/resource_policies.py) | policy keys/constraints/snapshot 설명, `tests/test_waygate_provisioner.py` |
 | migration/export/import | [`waygate/api/migration.py`](waygate/api/migration.py), [`waygate/services/migration.py`](waygate/services/migration.py) | bundle/key/network recreation limit, `tests/test_waygate_migration.py` |
-| ORM/migration/config/deployment/CI | [`waygate/models/orm.py`](waygate/models/orm.py), [`waygate/migrations/`](waygate/migrations/), [`waygate/config.py`](waygate/config.py), [`docker/Dockerfile`](docker/Dockerfile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | schema/operations/verification sections와 migration ledger, CI/architecture hook |
+| ORM/migration/config/deployment/CI | [`waygate/models/orm.py`](waygate/models/orm.py), [`waygate/migrations/`](waygate/migrations/), [`waygate/config.py`](waygate/config.py), [`docker/Dockerfile`](docker/Dockerfile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml), [`AGENTS.md`](AGENTS.md)의 CI 파이프라인 성능 규정 | schema/operations/verification sections와 migration ledger, CI/architecture hook, [`tests/test_ci_workflow_contract.py`](tests/test_ci_workflow_contract.py), `actionlint`, CI 전후 실측 |
 | SDK path/method | [`sdk/waygate_sdk/proxy.py`](sdk/waygate_sdk/proxy.py), [`sdk/waygate_sdk/service.py`](sdk/waygate_sdk/service.py) | SDK contract와 [`sdk/tests/test_proxy.py`](sdk/tests/test_proxy.py) |
 | bugfix/refactor with no topology change | 실제 변경 source와 영향받은 test | 구조 영향이 없다는 이유를 Maintenance review summary에 남기고 source digest를 다시 stamp한다. |
 
@@ -230,9 +234,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "14443e364862111ea7a948fae8c9192d8e5f868451a0dec4da1ef12436518764",
-  "reviewed_at": "2026-09-18T23:20:29Z",
-  "summary": "Relax requires-python to >=3.11 for Kolla control node compatibility; bump afterglow-crypto service pin to the matching >=3.11 commit"
+  "source_sha256": "bc2d1ccad3bd785a08cdcf6116d4f9b830d9620095d173a06dde9baaf65d6d0a",
+  "reviewed_at": "2026-09-23T19:06:41Z",
+  "summary": "CI performance: reviewed .github/workflows/ci.yml, .github/workflows/docker-build.yml, pyproject.toml, uv.lock, tests/conftest.py, tests/test_architecture_guard.py, scripts/check_architecture.py, docker/Dockerfile, AGENTS.md. ci.yml drops the push trigger (pull_request + workflow_call only) and runs service pytest with pytest-xdist -n 4 --dist worksteal; docker-build.yml skips the duplicate test job on pull_request and gates build-and-push on needs.test success (PR builds never push). Adds pytest-xdist to the dev extra (lock adds only pytest-xdist 3.8.0 and execnet 2.1.2), tests/test_ci_workflow_contract.py, and the AGENTS.md CI performance rules with the measured baseline. No runtime, API, schema, image content or deployment topology change; Deployment and operations CI bullets, verification commands and change guide updated."
 }
 ```
 <!-- architecture-review:end -->

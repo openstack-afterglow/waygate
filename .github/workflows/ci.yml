@@ -1,10 +1,11 @@
 name: CI
 
+# Push, tag and dispatch runs execute this workflow once through Docker Build &
+# Push's `test` job (workflow_call), which gates the image build. A separate push
+# trigger here would run the identical ci.yml a second time for the same SHA.
 on:
   workflow_call:
   pull_request:
-    branches: [main, dev]
-  push:
     branches: [main, dev]
 
 permissions:
@@ -23,7 +24,8 @@ jobs:
           python-version: '3.12'
           enable-cache: true
       - run: uv sync --extra service --extra dev --frozen
-      - run: uv run pytest tests
+      # 4 workers match the 4 vCPU public ubuntu-latest runner; never `-n auto`.
+      - run: uv run pytest tests -n 4 --dist worksteal
       - run: uv run ruff check .
 
   sdk:

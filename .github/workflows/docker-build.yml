@@ -14,11 +14,17 @@ env:
 
 jobs:
   test:
+    # On pull_request, CI's own pull_request run executes this same ci.yml on the
+    # same merge ref, so this copy is skipped. PR image builds never push.
+    if: github.event_name != 'pull_request'
     uses: ./.github/workflows/ci.yml
 
   build-and-push:
     name: Build & Push Waygate Images
     needs: test
+    # Push, tag and dispatch builds require a successful test job. A pull_request
+    # build runs without waiting because its test job is skipped and it pushes nothing.
+    if: ${{ !cancelled() && (needs.test.result == 'success' || (github.event_name == 'pull_request' && needs.test.result == 'skipped')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
