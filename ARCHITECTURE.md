@@ -168,7 +168,7 @@ flowchart LR
 
 ## Development and verification
 
-2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 `uv run pytest tests`와 `uv run pytest tests -n 4 --dist worksteal`이 각각 261건을 통과했다(3.13.12에서 pytest 보고 기준 직렬 약 8.5초, 4 워커 약 3.7초의 로컬 측정이며 CI 측정값이 아니다). focused boundary 98건, Kolla assets 5건, `uv run ruff check .`, SDK 21건과 SDK lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
+2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 `uv run pytest tests`와 `uv run pytest tests -n 4 --dist worksteal`이 각각 261건을 통과했다(3.13.12에서 pytest 보고 기준 두 번 실행에서 직렬 8.5~9.7초, 4 워커 약 3.7초의 로컬 측정이며 CI 측정값이 아니다). focused boundary 98건, Kolla assets 5건, `uv run ruff check .`, SDK 21건과 SDK lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
 
 ### Waygate service
 
@@ -243,9 +243,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "6e018f6d7cf3e992337788eda40a36de6d6753212796776094f0e98bd230c245",
-  "reviewed_at": "2026-09-23T22:00:23Z",
-  "summary": "CI review round 2: reviewed .github/workflows/ci.yml, .github/workflows/docker-build.yml (both unchanged), tests/test_ci_workflow_contract.py, AGENTS.md, ARCHITECTURE.md, pyproject.toml. The contract (13 -> 18 tests, 261 total serial and -n 4) now pins ci.yml structurally: workflow/job/step key sets (no if, continue-on-error, env, shell, working-directory; defaults only as sdk working-directory: sdk; permissions contents: read; workflow_call without inputs), checkout without with, and the ordered step signatures of both jobs (action name without version plus normalized run command). Publishing detection treats any action outside a reviewed allowlist, registry/package publish commands (crane, skopeo, oras, buildx build, type=registry, twine, uv publish, docker login), packages/id-token/contents write or inherited default token permissions, secret references and non-ci.yml reusable workflows as able to publish, and requires needs: test plus the build gate. All workflows accept only push, pull_request, workflow_dispatch, workflow_call, schedule triggers and never interpolate github.event or github.head_ref into run. AGENTS.md rules 3, 7, 10, 11 and the ARCHITECTURE.md CI bullet updated (pytest-config self-detection limit, required status check mitigation not applied, rule-3 PR build exception pending owner confirmation, corrected -p xdist rationale). No runtime, API, schema, image content, workflow or deployment topology change."
+  "source_sha256": "a03750e5c965257abbf476b733b11a753b5eb3593b52dba5e762fe15b877e5f1",
+  "reviewed_at": "2026-09-23T22:04:25Z",
+  "summary": "CI review round 2 follow-up: reviewed tests/test_ci_workflow_contract.py, AGENTS.md, ARCHITECTURE.md; workflows unchanged. Publish detection now matches secrets referenced in any expression form (secrets.NAME, secrets['NAME'], toJSON(secrets)) instead of the literal 'secrets.' substring; AGENTS.md rule 11 names those forms; ARCHITECTURE.md local timing restated over two runs (serial 8.5-9.7s, 4 workers ~3.7s, local only). Contract still 18 tests, 261 total serial and -n 4. No runtime, API, schema, image content, workflow or deployment topology change."
 }
 ```
 <!-- architecture-review:end -->

@@ -55,6 +55,8 @@ PUBLISH_COMMAND = re.compile(
 # base-repository secrets or write tokens on behalf of untrusted actors.
 ALLOWED_TRIGGERS = frozenset({"push", "pull_request", "workflow_dispatch", "workflow_call", "schedule"})
 EVENT_PAYLOAD_EXPRESSION = re.compile(r"\$\{\{[^}]*\b(github\.event\.|github\.head_ref\b)")
+# secrets.NAME, secrets['NAME'] and toJSON(secrets) inside any expression.
+SECRET_EXPRESSION = re.compile(r"\$\{\{[^}]*\bsecrets\b")
 
 CI_WORKFLOW_KEYS = {"name", "on", "permissions", "jobs"}
 CI_JOB_KEYS = {
@@ -164,7 +166,7 @@ def _job_can_publish(workflow: dict, job: dict) -> bool:
         return job["uses"] != CI_CALL
     if _token_can_publish(job.get("permissions", workflow.get("permissions"))):
         return True
-    if "secrets." in str(job):
+    if SECRET_EXPRESSION.search(str(job)):
         return True
     return any(_step_publishes(step) for step in job.get("steps", []))
 

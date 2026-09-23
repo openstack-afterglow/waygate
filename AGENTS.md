@@ -64,7 +64,7 @@ job 중앙값(성공 job 기준): `Service tests and lint` 21초(setup 약 8초,
      - 검토된 allowlist(`actions/checkout`, `astral-sh/setup-uv`, `docker/setup-buildx-action`, `docker/metadata-action`) 밖의 action을 쓴다. local composite `./...`와 `docker://`도 포함한다.
      - push할 수 있는 build/bake action을 쓰거나, registry·package 발행 명령(`docker push`/`docker login`, `--push`, `push=true`, `type=registry`, `buildx build`, `imagetools create`, `crane`, `skopeo`, `oras`, `twine`, `uv publish`)을 실행한다.
      - token에 `packages`, `id-token`, `contents` write가 있다. job과 workflow 모두 `permissions`를 지정하지 않아 저장소 기본값을 상속하는 경우도 포함한다. 현재 기본값은 read지만 PR 없이 설정만으로 바뀔 수 있다.
-     - secret을 참조하거나, `ci.yml` 이외의 reusable workflow를 호출한다.
+     - expression에서 `secrets`를 참조하거나(`secrets.NAME`, `secrets['NAME']`, `toJSON(secrets)`), `ci.yml` 이외의 reusable workflow를 호출한다.
    - `ci.yml` 구조:
      - workflow key 집합은 `name`, `on`, `permissions`(`contents: read`), `jobs`뿐이다. workflow `env`, `defaults`, `concurrency`는 없다.
      - job key 집합: service는 `name`, `runs-on`, `steps`, sdk는 여기에 `defaults`(`run.working-directory: sdk`만)를 더한 것이다. 따라서 job `if`, `continue-on-error`, `env`, `strategy`, `permissions`, `needs`가 없다.
