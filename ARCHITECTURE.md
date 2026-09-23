@@ -254,9 +254,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "7a8ea3f7a0f82dd7d22d6c817438f0e5dff52bcb7ae561e96cf8a95031687776",
-  "reviewed_at": "2026-09-23T23:01:44Z",
-  "summary": "CI review round 3: reviewed tests/test_ci_workflow_contract.py, AGENTS.md rules 3/10/11 and ARCHITECTURE.md CI bullets; ci.yml and docker-build.yml unchanged. Contract: secret detection scans every job value plus workflow-level env with an expression body that tolerates single braces (format()), case-insensitive; event-payload detection covers dot, bracket and function forms; any write token scope counts as publishing; PR build steps pin exact with keys, and build/bake inputs with push=true or type=registry count as publishing; one test-running job set across push/pull_request workflows; setup-uv inputs pinned; serial entrypoint checks pytest inipath and xdist options in any spelling; parametrized helper tests. Contract 18->65 tests, full suite 261->308 serial and -n 4. Rule 3 aligned with the clarified canonical rule (publishing and deploys gated; non-publishing PR builds may run in parallel). Rule 10 records owner-only settings paths and their 2026-09-24 state. No runtime, API, schema, image content, workflow or deployment topology change."
+  "source_sha256": "05f8b29fac2cf92bcfd02240549189ce00c5977b4dbb1f04308136f4c109c8bf",
+  "reviewed_at": "2026-09-23T23:04:14Z",
+  "summary": "Docs-only follow-up to the CI review round 3 commit: AGENTS.md rule 10 now attributes the Free-plan runner-group limit to GitHub's docs (additional groups need Team) instead of asserting an observed Default-only state; the Default group's config stays unverified (403 without admin:org). Reviewed AGENTS.md rule 10 only; no source, test, workflow, runtime, API, schema, image or deployment change."
 }
 ```
 <!-- architecture-review:end -->
