@@ -11,7 +11,7 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 ## Development status
 
-상태와 검증 수준은 서로 다른 축이다. 2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 256건(architecture guard 13건, CI 형태 계약 13건 포함)을 통과했다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
+상태와 검증 수준은 서로 다른 축이다. 2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 261건(architecture guard 13건, CI 형태 계약 18건 포함)을 통과했다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
 
 | 기능 | Implementation | Verification evidence | Current limit | Source |
 |---|---|---|---|---|
@@ -143,7 +143,16 @@ flowchart LR
 - API/worker Python logging은 stdout/stderr로 수집할 수 있고, cloud-init register/reconcile agent는 `/var/log/waygate-agent.log`와 systemd journal에 기록한다. 운영자는 server status와 Redis의 최근 status report를 함께 확인해야 한다.
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml)(`CI`)은 `pull_request`(main, dev)와 `workflow_call`로만 실행되며 `push` trigger가 없다. `service` job은 checkout 뒤 첫 step으로 architecture check를 하고 `uv sync --extra service --extra dev --frozen`, `uv run pytest tests -n 4 --dist worksteal`(dev extra의 pytest-xdist, public `ubuntu-latest` 4 vCPU에 맞춘 고정 워커 수), `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다. 두 job 사이에 `needs`는 없다.
 - [`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml)(`Docker Build & Push`)은 push(main, dev), tag `v*`, `pull_request`(main, dev), `workflow_dispatch`로 실행된다. push/tag/dispatch에서는 `test` job이 `ci.yml`을 호출하는, pushed ref 또는 dispatch 실행당 유일한 테스트 실행이다. release tag push는 branch push로 이미 테스트된 SHA를 다시 테스트한다(같은 SHA의 dev push와 `v*` tag push가 별도 `push` event run이다). `build-and-push`는 `needs: test`와 `needs.test.result == 'success'`일 때만 API/worker 이미지를 빌드해 GHCR에 push한다. pull_request에서는 CI 자체의 pull_request run이 같은 merge ref에서 같은 `ci.yml`을 실행하므로 `test` job을 건너뛰고, 이미지 빌드는 테스트를 기다리지 않고 실행하되 push하지 않으며(`push: ${{ github.event_name != 'pull_request' }}`) GHCR에 로그인하지도 않는다(`Log in to GHCR` step의 `if: github.event_name != 'pull_request'`). 테스트가 실패하는 PR도 이 빌드 job을 실행한다. 따라서 push commit의 check 이름은 `Docker Build & Push / test / ...`이고, PR에는 `CI / ...` check와 no-push 이미지 빌드 check가 붙는다.
-- [`tests/test_ci_workflow_contract.py`](tests/test_ci_workflow_contract.py)가 trigger 집합, 두 워크플로우의 `pull_request` 설정 동일성, dedup `if:`, 빌드 게이팅 식, 이미지 발행·registry 로그인 job 전부의 게이팅, PR 빌드 no-push와 no-login, `ci.yml`의 `continue-on-error` 부재, xdist 워커 수, 직렬 entrypoint 유지, `*.yml`/`*.yaml` 전체 workflow의 `ubuntu-latest` 전용 runner를 고정한다. 이 계약 테스트는 `ci.yml`을 통해서만 실행되고 `actionlint`는 로컬 전용이므로, `ci.yml` 자신의 `pull_request` trigger를 제거·축소하는 PR은 merge 전에 잡히지 않고 merge 뒤 branch push의 Docker Build & Push `test` job에서 이미지 발행을 막으며 드러난다. CI 성능 규정과 기록된 기준 수치는 [`AGENTS.md`](AGENTS.md)의 `CI 파이프라인 성능 규정`에 있다.
+- [`tests/test_ci_workflow_contract.py`](tests/test_ci_workflow_contract.py)가 다음을 고정한다.
+  - trigger: trigger 집합, 두 워크플로우의 `pull_request` 설정 동일성, dedup `if:`, 모든 `*.yml`/`*.yaml` workflow의 trigger allowlist(`push`, `pull_request`, `workflow_dispatch`, `workflow_call`, `schedule`).
+  - 발행 게이팅: 빌드 게이팅 식, PR 빌드 no-push와 no-login. 발행할 수 있는 job은 모두 `needs: test`와 게이트 식을 가져야 한다. 여기에는 검토된 action allowlist 밖의 action, 발행 명령, `packages`/`id-token`/`contents` write나 상속된 기본 token 권한, secret 참조, `ci.yml` 이외 reusable workflow 호출이 있는 job이 해당한다.
+  - `ci.yml` 구조: workflow·job·step key 집합, 즉 `if`, `continue-on-error`, `env`, `shell`, `working-directory`가 없고 `defaults`는 sdk job의 `working-directory: sdk`만 있다. 여기에 `with` 없는 checkout, action 이름과 정규화한 `run` 명령으로 이루어진 두 job의 순서 있는 step 목록, xdist 워커 수, 직렬 entrypoint 유지를 고정한다.
+  - 보안: `run:`의 event payload 보간 금지, `ubuntu-latest` 전용 runner.
+  - 한계:
+    - 계약 테스트는 자신이 판정할 pytest 설정 아래에서 실행되므로 `addopts`나 `conftest.py`로 테스트를 건너뛰게 만드는 변경은 잡지 못한다.
+    - 계약 테스트는 `ci.yml`을 통해서만 실행되고 `actionlint`는 로컬 전용이다. 그래서 `ci.yml` 자신의 `pull_request` trigger를 제거·축소하는 PR은 merge 전에 잡히지 않는다. 이 회귀는 merge 뒤 branch push의 Docker Build & Push `test` job이 이미지 발행을 막을 때 드러난다.
+    - required status check는 아직 설정되지 않았다(`AGENTS.md` 규칙 11).
+- CI 성능 규정과 기록된 기준 수치는 [`AGENTS.md`](AGENTS.md)의 `CI 파이프라인 성능 규정`에 있다.
 
 ## Security boundaries
 
@@ -159,7 +168,7 @@ flowchart LR
 
 ## Development and verification
 
-2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 `uv run pytest tests`와 `uv run pytest tests -n 4 --dist worksteal`이 각각 256건을 통과했다(3.13.12에서 직렬 약 8.8초, 4 워커 약 4.0초의 로컬 측정이며 CI 측정값이 아니다). focused boundary 98건, Kolla assets 5건, `uv run ruff check .`, SDK 21건과 SDK lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
+2026-09-24 로컬(macOS, Python 3.13.12와 3.12.13)에서 `uv run pytest tests`와 `uv run pytest tests -n 4 --dist worksteal`이 각각 261건을 통과했다(3.13.12에서 pytest 보고 기준 직렬 약 8.5초, 4 워커 약 3.7초의 로컬 측정이며 CI 측정값이 아니다). focused boundary 98건, Kolla assets 5건, `uv run ruff check .`, SDK 21건과 SDK lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
 
 ### Waygate service
 
@@ -234,9 +243,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "d8426445538b290bf4464dcfb6460ce625b9cb6f9ce04d80e1e8538599e982b8",
-  "reviewed_at": "2026-09-23T21:36:33Z",
-  "summary": "CI review round 1: reviewed .github/workflows/ci.yml, .github/workflows/docker-build.yml, tests/test_ci_workflow_contract.py, AGENTS.md, README.md, docker/Dockerfile. docker-build.yml skips the GHCR login step on pull_request (PR builds push nothing and pull only public bases; the job token keeps packages: write); ci.yml comment reworded. Contract test now globs *.yml and *.yaml, rejects continue-on-error on ci.yml jobs/steps, requires needs: test plus the build gate on every job that logs in to a registry or can push images, and pins the PR login skip (256 tests serial and -n 4). AGENTS.md baselines switched to success-only populations (test critical path push/tag n=16 24.0/29.0s; commit-to-image push/tag test-gated n=9 89.0/111.0s; triggers 28.8s/106.8s), rule 3 scoped to publish gating with the PR build tradeoff, rule 9 restores the canonical same-repo/tree-identity condition and documents that release tags re-test their branch SHA, rule 11 states actionlint is local-only and ci.yml trigger regressions surface post-merge, rule 2 keeps the runner-minutes conditional. No runtime, API, schema, image content or deployment topology change."
+  "source_sha256": "6e018f6d7cf3e992337788eda40a36de6d6753212796776094f0e98bd230c245",
+  "reviewed_at": "2026-09-23T22:00:23Z",
+  "summary": "CI review round 2: reviewed .github/workflows/ci.yml, .github/workflows/docker-build.yml (both unchanged), tests/test_ci_workflow_contract.py, AGENTS.md, ARCHITECTURE.md, pyproject.toml. The contract (13 -> 18 tests, 261 total serial and -n 4) now pins ci.yml structurally: workflow/job/step key sets (no if, continue-on-error, env, shell, working-directory; defaults only as sdk working-directory: sdk; permissions contents: read; workflow_call without inputs), checkout without with, and the ordered step signatures of both jobs (action name without version plus normalized run command). Publishing detection treats any action outside a reviewed allowlist, registry/package publish commands (crane, skopeo, oras, buildx build, type=registry, twine, uv publish, docker login), packages/id-token/contents write or inherited default token permissions, secret references and non-ci.yml reusable workflows as able to publish, and requires needs: test plus the build gate. All workflows accept only push, pull_request, workflow_dispatch, workflow_call, schedule triggers and never interpolate github.event or github.head_ref into run. AGENTS.md rules 3, 7, 10, 11 and the ARCHITECTURE.md CI bullet updated (pytest-config self-detection limit, required status check mitigation not applied, rule-3 PR build exception pending owner confirmation, corrected -p xdist rationale). No runtime, API, schema, image content, workflow or deployment topology change."
 }
 ```
 <!-- architecture-review:end -->
