@@ -1,7 +1,9 @@
 """Standalone Waygate configuration compatibility contracts."""
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from waygate import config
 
@@ -28,3 +30,50 @@ def test_afterglow_openstack_section_is_mapped(monkeypatch):
 
     assert settings["os_auth_url"] == "https://keystone.example.test/v3"
     assert settings["os_region_name"] == "RegionTwo"
+
+
+def test_public_callback_base_url_is_required():
+    settings = config.Settings(waygate_callback_base_url="")
+
+    with pytest.raises(RuntimeError, match="callback_base_url"):
+        config.require_public_callback_base_url(settings)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8010",
+        "http://api.localhost:8010",
+        "http://127.0.0.1:8010",
+        "http://127.42.0.9:8010",
+        "http://[::1]:8010",
+        "http://0.0.0.0:8010",
+    ],
+)
+def test_public_callback_base_url_rejects_loopback_and_unspecified_targets(url):
+    settings = config.Settings(waygate_callback_base_url=url)
+
+    with pytest.raises(RuntimeError, match="gateway VM"):
+        config.require_public_callback_base_url(settings)
+
+
+def test_public_callback_base_url_accepts_vm_reachable_http_endpoint():
+    settings = config.Settings(waygate_callback_base_url="https://waygate.example.test/control/")
+
+    assert config.require_public_callback_base_url(settings) == "https://waygate.example.test/control"
+
+
+@pytest.mark.asyncio
+async def test_api_startup_rejects_missing_callback_before_database_initialization(monkeypatch):
+    from waygate import main
+
+    settings = config.Settings(database_url="mysql+aiomysql://unused", waygate_callback_base_url="")
+    init_db = MagicMock()
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "init_db", init_db)
+
+    with pytest.raises(RuntimeError, match="callback_base_url"):
+        async with main.lifespan(main.app):
+            pass
+
+    init_db.assert_not_called()
