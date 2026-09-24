@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from waygate.config import get_settings
+from waygate.config import get_settings, require_public_callback_base_url
 from waygate.services import neutron, nova, waygate_agent_auth, waygate_config, waygate_db
 from waygate.services.openstack_ops import _allocate_new_fip, _extract_fixed_ip, _wait_for_active
 
@@ -82,6 +82,12 @@ async def provision_waygate_server(
     from waygate.services import keystone
 
     settings = get_settings()
+    try:
+        callback_base = require_public_callback_base_url(settings)
+    except RuntimeError as exc:
+        _logger.error("waygate_provisioner: invalid callback URL: %s", exc)
+        await waygate_db.update_server_status(server_id, "ERROR", str(exc))
+        return
 
     created_sg_id: str | None = None
     created_port_id: str | None = None
@@ -126,7 +132,6 @@ async def provision_waygate_server(
         # 3. reconcile 베어러 토큰 발급
         bootstrap_token = await waygate_agent_auth.issue_report_token(server_id, project_id)
 
-        callback_base = settings.waygate_callback_base_url.rstrip("/")
         register_url = f"{callback_base}/v1/servers/{server_id}/agent/register"
         desired_state_url = f"{callback_base}/v1/servers/{server_id}/agent/desired-state"
         status_url = f"{callback_base}/v1/servers/{server_id}/agent/status"

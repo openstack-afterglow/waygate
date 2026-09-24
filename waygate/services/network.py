@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from waygate.services import keystone, nova, waygate_db
+from waygate.services import keystone, neutron, nova, waygate_db
 
 _logger = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ def _resolve_cidr(conn, network_id: str, subnet_id: str | None) -> tuple[str, st
         subnet = conn.network.get_subnet(subnet_id)
         if subnet is None or subnet.network_id != network_id:
             raise WaygateNetworkError(404, "서브넷을 찾을 수 없거나 네트워크와 일치하지 않습니다")
+        if getattr(subnet, "ip_version", 4) != 4:
+            raise WaygateNetworkError(422, "Waygate 네트워크 연결은 IPv4 서브넷만 지원합니다")
         return subnet.id, subnet.cidr
 
     subnets = [s for s in conn.network.subnets(network_id=network_id)]
@@ -85,21 +87,48 @@ async def attach_network(project_id: str, server: dict, network_id: str, subnet_
                 "status": "CREATING",
             },
         )
-
+        port_id: str | None = None
         try:
-            iface = await asyncio.to_thread(nova.attach_interface, conn, vm_id, network_id)
+            port = await asyncio.to_thread(
+                neutron.create_port,
+                conn,
+                network_id,
+                f"waygate-{server_id}-{att['id']}",
+                fixed_ips=[{"subnet_id": resolved_subnet_id}],
+            )
+            port_id = port["id"]
+            await waygate_db.update_attachment(att["id"], port_id=port_id)
+            await asyncio.to_thread(nova.attach_interface, conn, vm_id, port_id)
         except Exception as e:
-            _logger.error("waygate_network: attach_interface 실패 (server=%s): %s", server_id, e, exc_info=True)
-            await waygate_db.update_attachment(att["id"], status="ERROR")
+            _logger.error(
+                "waygate_network: subnet port attach 실패 (server=%s, subnet=%s): %s",
+                server_id,
+                resolved_subnet_id,
+                e,
+                exc_info=True,
+            )
+            if port_id:
+                try:
+                    await asyncio.to_thread(neutron.delete_port, conn, port_id)
+                except Exception:
+                    _logger.error(
+                        "waygate_network: attach rollback port 삭제 실패 (port=%s)",
+                        port_id,
+                        exc_info=True,
+                    )
+                    await waygate_db.update_attachment(att["id"], status="ERROR", port_id=port_id)
+                    raise WaygateNetworkError(500, "네트워크 인터페이스 연결에 실패했습니다") from e
+            await waygate_db.delete_attachment(server_id, project_id, att["id"])
             raise WaygateNetworkError(500, "네트워크 인터페이스 연결에 실패했습니다") from e
 
-        await waygate_db.update_attachment(att["id"], status="ACTIVE", port_id=iface["port_id"])
-        att.update({"status": "ACTIVE", "port_id": iface["port_id"], "cidr": cidr, "subnet_id": resolved_subnet_id})
+        await waygate_db.update_attachment(att["id"], status="ACTIVE")
+        att.update({"status": "ACTIVE", "port_id": port_id, "cidr": cidr, "subnet_id": resolved_subnet_id})
         _logger.info(
-            "waygate_network: server=%s network=%s attached (port=%s, cidr=%s)",
+            "waygate_network: server=%s network=%s subnet=%s attached (port=%s, cidr=%s)",
             server_id,
             network_id,
-            iface["port_id"],
+            resolved_subnet_id,
+            port_id,
             cidr,
         )
         return att
@@ -130,10 +159,18 @@ async def detach_network(project_id: str, server: dict, attachment_id: int) -> N
             try:
                 await asyncio.to_thread(nova.detach_interface, conn, vm_id, port_id)
             except Exception:
-                # best-effort: 포트가 이미 없거나 VM 이 사라진 경우에도 DB 레코드는 정리한다
                 _logger.warning(
-                    "waygate_network: detach_interface 실패 (port=%s) — 레코드는 정리", port_id, exc_info=True
+                    "waygate_network: detach_interface 실패 (port=%s); explicit port cleanup 계속",
+                    port_id,
+                    exc_info=True,
                 )
+        if port_id:
+            try:
+                await asyncio.to_thread(neutron.delete_port, conn, port_id)
+            except Exception as e:
+                _logger.error("waygate_network: port 삭제 실패 (port=%s)", port_id, exc_info=True)
+                await waygate_db.update_attachment(attachment_id, status="ERROR", port_id=port_id)
+                raise WaygateNetworkError(500, "네트워크 인터페이스 해제에 실패했습니다") from e
         await waygate_db.delete_attachment(server_id, project_id, attachment_id)
         _logger.info("waygate_network: server=%s attachment=%s detached", server_id, attachment_id)
     finally:

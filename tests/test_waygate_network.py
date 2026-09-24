@@ -209,7 +209,7 @@ class TestAttachNetworkService:
         assert ei.value.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_happy_path_resolves_cidr_and_attaches(self, monkeypatch):
+    async def test_happy_path_creates_subnet_port_then_attaches_that_port(self, monkeypatch):
         conn = MagicMock()
         net = MagicMock()
         net.project_id = "test-project-123"
@@ -218,15 +218,15 @@ class TestAttachNetworkService:
         subnet.network_id = "net-1"
         subnet.cidr = "192.168.9.0/24"
         subnet.id = "sub-1"
+        subnet.ip_version = 4
         conn.network.get_subnet.return_value = subnet
         conn.close = MagicMock()
 
+        create_port = MagicMock(return_value={"id": "port-1", "fixed_ip": "192.168.9.7"})
+        attach_interface = MagicMock(return_value={"port_id": "port-1", "net_id": "net-1", "fixed_ips": []})
         monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
-        monkeypatch.setattr(
-            waygate_network.nova,
-            "attach_interface",
-            lambda c, vm, nid: {"port_id": "port-1", "net_id": nid, "fixed_ips": []},
-        )
+        monkeypatch.setattr(waygate_network.neutron, "create_port", create_port)
+        monkeypatch.setattr(waygate_network.nova, "attach_interface", attach_interface)
         monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
         monkeypatch.setattr(
             waygate_network.waygate_db,
@@ -244,16 +244,57 @@ class TestAttachNetworkService:
                 }
             ),
         )
-        upd = AsyncMock()
-        monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", upd)
+        update_attachment = AsyncMock()
+        monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", update_attachment)
 
         result = await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat")
+
+        create_port.assert_called_once_with(
+            conn,
+            "net-1",
+            "waygate-srv-1-1",
+            fixed_ips=[{"subnet_id": "sub-1"}],
+        )
+        attach_interface.assert_called_once_with(conn, "vm-1", "port-1")
+        assert update_attachment.await_args_list[0].kwargs == {"port_id": "port-1"}
+        assert update_attachment.await_args_list[1].kwargs == {"status": "ACTIVE"}
         assert result["status"] == "ACTIVE"
         assert result["port_id"] == "port-1"
         assert result["cidr"] == "192.168.9.0/24"
-        # ACTIVE 로 승격 업데이트가 호출됐는지
-        assert upd.await_args.kwargs["status"] == "ACTIVE"
-        assert upd.await_args.kwargs["port_id"] == "port-1"
+
+    @pytest.mark.asyncio
+    async def test_attach_failure_deletes_created_port_and_attachment_record(self, monkeypatch):
+        conn = MagicMock()
+        net = MagicMock(project_id="test-project-123")
+        conn.network.get_network.return_value = net
+        subnet = MagicMock(network_id="net-1", cidr="192.168.9.0/24", id="sub-1", ip_version=4)
+        conn.network.get_subnet.return_value = subnet
+
+        delete_port = MagicMock()
+        delete_attachment = AsyncMock()
+        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
+        monkeypatch.setattr(
+            waygate_network.neutron,
+            "create_port",
+            MagicMock(return_value={"id": "port-1", "fixed_ip": "192.168.9.7"}),
+        )
+        monkeypatch.setattr(waygate_network.neutron, "delete_port", delete_port)
+        monkeypatch.setattr(
+            waygate_network.nova,
+            "attach_interface",
+            MagicMock(side_effect=RuntimeError("nova attach failed")),
+        )
+        monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_network.waygate_db, "create_attachment_record", AsyncMock(return_value={"id": 1}))
+        monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", AsyncMock())
+        monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_attachment)
+
+        with pytest.raises(WaygateNetworkError) as exc_info:
+            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat")
+
+        assert exc_info.value.status_code == 500
+        delete_port.assert_called_once_with(conn, "port-1")
+        delete_attachment.assert_awaited_once_with("srv-1", "test-project-123", 1)
 
     @pytest.mark.asyncio
     async def test_rejects_cross_project_network(self, monkeypatch):
@@ -267,6 +308,45 @@ class TestAttachNetworkService:
         with pytest.raises(WaygateNetworkError) as ei:
             await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat")
         assert ei.value.status_code == 404  # 정보 노출 방지 — 동일 404
+
+    @pytest.mark.asyncio
+    async def test_rejects_explicit_ipv6_subnet(self, monkeypatch):
+        conn = MagicMock()
+        conn.network.get_network.return_value = MagicMock(project_id="test-project-123")
+        conn.network.get_subnet.return_value = MagicMock(
+            network_id="net-1",
+            cidr="2001:db8::/64",
+            id="sub-v6",
+            ip_version=6,
+        )
+        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
+        monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+
+        with pytest.raises(WaygateNetworkError) as exc_info:
+            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-v6", "snat")
+
+        assert exc_info.value.status_code == 422
+
+
+class TestDetachNetworkService:
+    @pytest.mark.asyncio
+    async def test_detach_removes_server_interface_port_and_attachment(self, monkeypatch):
+        conn = MagicMock()
+        detach_interface = MagicMock()
+        delete_port = MagicMock()
+        delete_attachment = AsyncMock()
+
+        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
+        monkeypatch.setattr(waygate_network.waygate_db, "get_attachment", AsyncMock(return_value=_attachment()))
+        monkeypatch.setattr(waygate_network.nova, "detach_interface", detach_interface)
+        monkeypatch.setattr(waygate_network.neutron, "delete_port", delete_port)
+        monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_attachment)
+
+        await waygate_network.detach_network("test-project-123", _server(), 1)
+
+        detach_interface.assert_called_once_with(conn, "vm-1", "port-1")
+        delete_port.assert_called_once_with(conn, "port-1")
+        delete_attachment.assert_awaited_once_with("srv-1", "test-project-123", 1)
 
 
 # ---------------------------------------------------------------------------

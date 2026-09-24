@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 
-from waygate.config import get_settings
+from waygate.config import get_settings, require_public_callback_base_url
 from waygate.db import close_db, init_db
 from waygate.services.jobs import process_one_job
 
@@ -15,6 +15,7 @@ _logger = logging.getLogger(__name__)
 
 async def serve() -> None:
     settings = get_settings()
+    require_public_callback_base_url(settings)
     if not settings.database_url:
         raise RuntimeError("Waygate worker requires database.url")
     init_db(

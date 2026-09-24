@@ -10,8 +10,8 @@ _logger = logging.getLogger(__name__)
 AFTERGLOW_MANAGED_TAG = "[afterglow-managed]"
 
 
-def attach_interface(conn, server_id: str, net_id: str) -> dict:
-    interface = conn.compute.create_server_interface(server_id, net_id=net_id)
+def attach_interface(conn, server_id: str, port_id: str) -> dict:
+    interface = conn.compute.create_server_interface(server_id, port_id=port_id)
     return {
         "port_id": interface.port_id,
         "net_id": interface.net_id,
@@ -42,10 +42,18 @@ def wait_server_deleted(conn, server_id: str, timeout: int = 120) -> None:
     raise TimeoutError(f"서버 {server_id} 삭제 대기 타임아웃 ({timeout}s)")
 
 
-def create_port(conn, network_id: str, name: str, security_group_ids: list[str] | None = None) -> dict:
+def create_port(
+    conn,
+    network_id: str,
+    name: str,
+    security_group_ids: list[str] | None = None,
+    fixed_ips: list[dict[str, str]] | None = None,
+) -> dict:
     kwargs: dict = {"network_id": network_id, "name": name}
     if security_group_ids:
         kwargs["security_groups"] = list(security_group_ids)
+    if fixed_ips:
+        kwargs["fixed_ips"] = fixed_ips
     port = conn.network.create_port(**kwargs)
     fixed_ip = port.fixed_ips[0].get("ip_address", "") if port.fixed_ips else ""
     return {"id": port.id, "fixed_ip": fixed_ip}

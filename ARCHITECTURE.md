@@ -6,12 +6,12 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 - Repository: [openstack-afterglow/waygate](https://github.com/openstack-afterglow/waygate)
 - 분석한 branch: `dev`; 분석한 작업 트리의 소스 기준일은 이 문서 작성 시점이다.
-- package versions: root distribution and Python runtime package `waygate` `0.1.3` (`pyproject.toml`, `waygate/__init__.py`); `waygate-sdk` remains `0.1.2` (`sdk/pyproject.toml`). The Kolla role's `waygate_image_tag` remains `0.1.2`, the known published runtime image default. Python `>=3.12`, FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
+- package versions: root distribution and Python runtime package `waygate` `0.1.3` (`pyproject.toml`, `waygate/__init__.py`); `waygate-sdk` remains `0.1.2` (`sdk/pyproject.toml`). The Kolla role's `waygate_image_tag` remains `0.1.2`, the known published runtime image default. Package Python `>=3.11` (CI and runtime image use 3.12), FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
 - 1분 책임 요약: `waygate-api`는 Keystone 인증·project 소유권·API를, `waygate-worker`는 durable provision/delete job을, MariaDB는 정본 레코드와 암호화 자격증명을, Redis는 상태·토큰의 보조 캐시를 소유한다. 실제 WireGuard private key와 NAT 적용은 게이트웨이 VM의 agent가 소유한다.
 
 ## Development status
 
-상태와 검증 수준은 서로 다른 축이다. 2026-09-08 `uv run pytest tests`에서 223건과 architecture guard focused 13건이 통과했다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
+상태와 검증 수준은 서로 다른 축이다. 2026-09-24 upstream `dev`에서 로컬 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 308건(architecture guard 13건, CI 형태 계약 65건 포함)을 통과했다. 별도로 2026-09-21 lifecycle/network/config 변경에 대해 `uv run pytest tests -q`에서 256건 통과·opt-in live 1건 skip, `uv run ruff check .` 통과가 기록되었다. 이 통합 candidate 자체의 gate 결과는 아직 없다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
 
 | 기능 | Implementation | Verification evidence | Current limit | Source |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 | Nova/Neutron 게이트웨이 VM provisioning | implemented | test-defined | 실제 OpenStack 리소스와 live 배포는 이 문서에서 검증하지 않았다. | [`waygate/services/provisioner.py`](waygate/services/provisioner.py), [`waygate/services/openstack_ops.py`](waygate/services/openstack_ops.py) |
 | VM agent register·desired-state·status | implemented | test-defined | agent가 부팅·네트워크·WireGuard 명령을 수행할 수 있어야 하며 status는 캐시가 만료될 수 있다. | [`waygate/api/agent.py`](waygate/api/agent.py), [`waygate/templates/waygate_agent.yaml.j2`](waygate/templates/waygate_agent.yaml.j2) |
 | WireGuard client 생성·수정·soft-delete·`.conf` 재다운로드 | implemented | test-defined | client private key는 서버 VM으로 보내지지 않으며 `.conf` 응답은 호출 시 평문이다. | [`waygate/api/clients.py`](waygate/api/clients.py), [`waygate/services/config_render.py`](waygate/services/config_render.py) |
-| 추가 네트워크 attach/detach 및 SNAT | partial | test-defined | SNAT만 지원한다. import는 network attachment를 다시 만들지 않는다. | [`waygate/api/attachments.py`](waygate/api/attachments.py), [`waygate/services/network.py`](waygate/services/network.py) |
+| 추가 네트워크 attach/detach 및 SNAT | implemented | `test-passed` (`tests/test_waygate_network.py`, 19 passed) | SNAT만 지원하며 실제 OpenStack 포트 hot-plug와 터널 data plane은 opt-in live 검증이 남아 있다. import는 network attachment를 다시 만들지 않는다. | [`waygate/api/attachments.py`](waygate/api/attachments.py), [`waygate/services/network.py`](waygate/services/network.py), [`tests/test_live_waygate_lifecycle.py`](tests/test_live_waygate_lifecycle.py) |
 | export/import migration bundle | partial | test-defined | client 데이터는 옮기지만 network 재연결은 후속 수동 작업이다. | [`waygate/api/migration.py`](waygate/api/migration.py), [`waygate/services/migration.py`](waygate/services/migration.py) |
 | admin resource-policy catalog | implemented | test-defined | system-admin Keystone 권한이 필요하다. | [`waygate/api/resource_policies.py`](waygate/api/resource_policies.py), [`waygate/auth.py`](waygate/auth.py) |
 | API health/discovery | implemented | test-defined | `/v1/health`는 process-only 응답이며 DB, Redis, OpenStack readiness를 확인하지 않는다. | [`waygate/main.py`](waygate/main.py), [`tests/test_waygate_feature_flag.py`](tests/test_waygate_feature_flag.py) |
@@ -45,7 +45,7 @@ flowchart LR
     VM --> WG[WireGuard + iptables SNAT]
 ```
 
-텍스트 흐름은 다음과 같다. 테넌트가 project-scoped Keystone 요청으로 서버를 생성하면 API가 현재 admin resource policy를 OpenStack에서 검증하고 snapshot을 MariaDB의 server/job transaction에 고정한다. worker가 job을 lease하여 Neutron port·security group과 Nova VM을 만들고, VM cloud-init이 자기 WireGuard key를 만든 뒤 server-scoped bearer로 register한다. 이후 VM timer가 `/agent/desired-state`를 폴링하여 peer와 NAT를 적용하고 `/agent/status`로 관측값을 보낸다. Afterglow는 이 API의 외부 BFF일 뿐이고, Drover·Lumen·Palimpsest는 Waygate 내부 상태의 소유자가 아니다.
+텍스트 흐름은 다음과 같다. 테넌트가 project-scoped Keystone 요청으로 서버를 생성하면 API가 현재 admin resource policy를 OpenStack에서 검증하고 snapshot을 MariaDB의 server/job transaction에 고정한다. worker는 gateway VM에서 도달 가능한 명시적 public callback base URL을 검증한 뒤 job을 lease하여 Neutron provider port·security group과 Nova VM을 만든다. VM cloud-init이 자기 WireGuard key를 만든 뒤 server-scoped bearer로 register한다. 추가 네트워크 연결은 선택한 subnet으로 `fixed_ips`를 제한한 Neutron port를 먼저 만들고 그 port ID를 Nova server interface에 붙인다. 이후 VM timer가 `/agent/desired-state`를 폴링하여 peer와 NAT를 적용하고 `/agent/status`로 관측값을 보낸다. Afterglow는 이 API의 외부 BFF일 뿐이고, Drover·Lumen·Palimpsest는 Waygate 내부 상태의 소유자가 아니다.
 
 ## Code map
 
@@ -61,11 +61,11 @@ flowchart LR
 | [`waygate/api/migration.py`](waygate/api/migration.py) | `export_waygate_server`, `import_waygate_server` | passphrase bundle export/import API다. |
 | [`waygate/api/resource_policies.py`](waygate/api/resource_policies.py) | `list_resource_policies`, `discover_resource_policy_options`, `update_resource_policy` | system-admin 전역 resource selection 관리 API다. |
 | [`waygate/services/jobs.py`](waygate/services/jobs.py) | `enqueue_*_job`, `_claim_one`, `process_one_job` | MariaDB transaction, `SELECT ... FOR UPDATE SKIP LOCKED`, lease, retry와 terminal failure를 구현한다. |
-| [`waygate/services/provisioner.py`](waygate/services/provisioner.py) | `provision_waygate_server`, `delete_waygate_server`, `_rollback` | persisted snapshot으로 Nova/Neutron lifecycle을 조정하고 실패 시 best-effort rollback한다. |
+| [`waygate/services/provisioner.py`](waygate/services/provisioner.py) | `provision_waygate_server`, `delete_waygate_server`, `_rollback` | VM-reachable callback URL을 fail-closed 검증하고 persisted snapshot으로 Nova/Neutron lifecycle을 조정하며 실패 시 best-effort rollback한다. |
 | [`waygate/services/store.py`](waygate/services/store.py) | `waygate_db` CRUD | ORM row와 API dict 변환, project filtering, soft-delete, attachment/client 저장을 담당한다. |
 | [`waygate/services/agent_auth.py`](waygate/services/agent_auth.py) | `issue_report_token`, `verify_report_token`, `store_status_result` | 암호화된 durable agent token과 Redis token/status cache의 lifecycle을 담당한다. |
 | [`waygate/services/config_render.py`](waygate/services/config_render.py) | `render_client_conf`, `render_agent_desired_state`, `render_agent_userdata` | client config, agent JSON, Nova cloud-init userdata를 렌더한다. |
-| [`waygate/services/network.py`](waygate/services/network.py) | `attach_network`, `detach_network` | Neutron network/subnet을 확인하고 Nova interface와 attachment row를 연결한다. |
+| [`waygate/services/network.py`](waygate/services/network.py) | `attach_network`, `detach_network` | Neutron network/subnet을 확인하고 subnet-constrained port 생성 → port-ID Nova attach → attachment row 활성화를 조정한다. 실패 시 port/row를 rollback하며 detach는 interface와 explicit port를 함께 정리한다. |
 | [`waygate/services/resource_policies.py`](waygate/services/resource_policies.py) | `resolve_policy_snapshot`, `set_policy` | public/community image, public flavor, shared/external network 정책을 발견·검증한다. |
 | [`waygate/services/migration.py`](waygate/services/migration.py) | `export_bundle`, `import_bundle` | passphrase wrapping과 client/network bundle 변환을 담당한다. |
 | [`waygate/models/orm.py`](waygate/models/orm.py) | `WaygateServer`, `WaygateClient`, `WaygateNetworkAttachment`, `WaygateJob`, `ResourcePolicy` | MariaDB durable schema와 project/server 관계, 상태, 암호문 필드를 정의한다. |
@@ -85,7 +85,7 @@ flowchart LR
 2. `resolve_policy_snapshot()`이 `waygate.provider_network`, `waygate.image`, `waygate.flavor`를 현재 execution scope에서 재검증하고 선택적으로 `waygate.floating_network`을 읽는다.
 3. `enqueue_provision_job()`은 `WaygateServer(status=CREATING, resource_policy_snapshot=...)`와 `WaygateJob(kind=provision,status=queued)`를 한 MariaDB transaction에 기록한 뒤 201을 반환한다.
 4. `waygate-worker`의 `_claim_one()`은 queued 또는 900초 이상 stale running job을 `SKIP LOCKED`로 lease한다. `process_one_job()`은 최대 3회 시도하며 실패하면 재queue하거나 server/job을 failed로 만든다.
-5. `provision_waygate_server()`는 provider port, UDP ingress security group, server-scoped encrypted bearer, Nova VM을 만든다. VM이 ACTIVE가 되면 FIP 또는 fixed IP를 기록하고 `PROVISIONING`으로 남겨 register를 기다린다.
+5. `provision_waygate_server()`는 `waygate.callback_base_url`이 절대 HTTP(S) URL이며 `localhost`, `.localhost`, loopback/unspecified IP가 아닌지 먼저 검증한다. API/worker startup도 같은 검사를 실행하고 빈 값이나 VM에서 도달할 수 없는 loopback 값을 서비스 내부 DNS로 자동 변환하지 않는다. 검증 뒤 provider port, UDP ingress security group, server-scoped encrypted bearer, Nova VM을 만든다. VM이 ACTIVE가 되면 FIP 또는 fixed IP를 기록하고 `PROVISIONING`으로 남겨 register를 기다린다.
 6. cloud-init register script는 VM 안에서 `/etc/wireguard/privatekey`와 public key를 최초 1회 생성하고 `/agent/register`로 public key를 보낸다. 백엔드는 server 경로에 귀속된 bearer를 비교한 뒤 CREATING/PROVISIONING을 ACTIVE로 전환한다.
 7. systemd timer가 부팅 20초 후 시작하고 기본 15초 간격으로 reconcile한다. `/agent/desired-state`의 enabled peer와 `nat_networks`를 받아 `wg syncconf`와 SNAT를 실행하고, `wg show` 결과를 `/agent/status`로 보낸다. status는 Redis에 5분 TTL로 저장되어 API 응답의 최신 peer count/handshake 보조 정보가 된다.
 8. 삭제는 `DELETE /v1/servers/{server_id}`에서 server를 `DELETING`으로 바꾸고 중복 active delete job을 막는다. worker가 FIP/VM/provider port와 agent token을 정리한 뒤 DB row를 soft-delete한다. 삭제 API는 202만 반환하고 client-observable `DELETED` event를 약속하지 않는다.
@@ -96,7 +96,7 @@ flowchart LR
 
 ### 네트워크 attach/detach
 
-`POST /v1/servers/{server_id}/networks`는 ACTIVE VM과 project-owned 또는 명시적으로 shared/external인 network를 확인하고 첫 IPv4 또는 지정 subnet의 CIDR을 기록한다. `waygate_network.attach_network()`이 `nova.attach_interface`로 VM에 port를 붙인 뒤 `WaygateNetworkAttachment(status=ACTIVE, port_id, cidr)`를 저장한다. 에이전트의 다음 reconcile에서 이 CIDR을 `nat_networks`로 받아 tunnel source를 해당 NIC로 `MASQUERADE`한다. `DELETE .../networks/{attachment_id}`는 interface detach를 best-effort로 시도하고 attachment row를 삭제한다. VM/network가 이미 사라져도 DB 정리는 진행될 수 있다.
+`POST /v1/servers/{server_id}/networks`는 ACTIVE VM과 project-owned 또는 명시적으로 shared/external인 network를 확인하고 첫 IPv4 또는 지정 subnet의 ID/CIDR을 선택한다. `waygate_network.attach_network()`은 `fixed_ips=[{"subnet_id": ...}]`로 explicit Neutron port를 만들고 그 port ID로 Nova server interface를 생성한 뒤 `WaygateNetworkAttachment(status=ACTIVE, port_id, subnet_id, cidr)`를 저장한다. port 생성 또는 interface attach가 실패하면 생성한 port와 attachment row를 rollback하며, port 삭제까지 실패한 경우 복구 가능한 `ERROR` row와 `port_id`를 남긴다. 에이전트의 다음 reconcile은 이 CIDR을 `nat_networks`로 받아 tunnel source를 해당 NIC로 `MASQUERADE`한다. `DELETE .../networks/{attachment_id}`는 interface detach 뒤 port를 명시적으로 삭제하고 성공한 경우에만 attachment row를 지운다. interface가 이미 없어도 port cleanup을 계속하지만 port 삭제 실패는 row를 `ERROR`로 보존하고 요청을 실패시킨다.
 
 ### Export/import
 
@@ -133,7 +133,7 @@ flowchart LR
 
 `docker/Dockerfile`은 `waygate-runtime`을 만든 뒤 `waygate-api`와 `waygate-worker` target으로 나눈다. Builder는 root package의 `service` extra만 설치하므로 role-only wheel 소비자는 service runtime이나 Kolla-Ansible을 받지 않는다. API는 `uvicorn waygate.main:app --host 0.0.0.0 --port 8010`, worker는 `python -m waygate.worker`로 시작한다. `pyproject.toml`의 console scripts는 `waygate-api`, `waygate-worker`, `waygate-migrate`, `waygate-cutover`를 제공한다. SDK는 `sdk/` 아래 별도 package와 별도 `uv.lock`을 가진다.
 
-설정은 `WAYGATE_CONFIG_FILE`이 지정한 TOML 또는 후보 `waygate.conf`에서 읽고, environment가 우선한다. 주요 섹션은 `[keystone]`/`[openstack]`, `[database]`, `[cache]`, `[waygate]`이며 callback base URL, 기본 tunnel CIDR `10.8.0.0/24`, 기본 listen port `51820`, encryption key, trusted proxies를 포함한다. API와 worker 모두 `database.url`이 필요하다. Redis 기본 URL은 `redis://localhost:6379/6`이다.
+설정은 `WAYGATE_CONFIG_FILE`이 지정한 TOML 또는 후보 `waygate.conf`에서 읽고, environment가 우선한다. 주요 섹션은 `[keystone]`/`[openstack]`, `[database]`, `[cache]`, `[waygate]`이며 callback base URL, 기본 tunnel CIDR `10.8.0.0/24`, 기본 listen port `51820`, encryption key, trusted proxies를 포함한다. API와 worker 모두 `database.url` 및 gateway VM에서 도달 가능한 non-loopback `waygate.callback_base_url`이 필요하다. Afterglow Compose는 operator-facing `WAYGATE_PUBLIC_BASE_URL`을 이 설정으로 전달하며 localhost/container-DNS 기본값을 제공하지 않는다. Redis 기본 URL은 `redis://localhost:6379/6`이다.
 
 ### Bootstrap, migration, health, 관측
 
@@ -141,7 +141,29 @@ flowchart LR
 - migration runner는 `schema_migrations` ledger에 logical ID/path/SHA-256/applied time을 기록하며 적용된 identity가 변하면 실패한다. DB schema가 먼저 준비되지 않으면 API/worker는 정상 동작하지 않는다.
 - `/v1/health`의 `{"status":"ok"}`는 프로세스 route가 응답한다는 뜻뿐이다. DB·Redis·Keystone·Neutron·Nova 연결 readiness나 agent 상태를 확인하지 않는다.
 - API/worker Python logging은 stdout/stderr로 수집할 수 있고, cloud-init register/reconcile agent는 `/var/log/waygate-agent.log`와 systemd journal에 기록한다. 운영자는 server status와 Redis의 최근 status report를 함께 확인해야 한다.
-- 현행 CI의 `service` job은 checkout 뒤 architecture check, `uv sync --extra service --extra dev --frozen`, `uv run pytest tests`, `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml)(`CI`)은 `pull_request`(main, dev)와 `workflow_call`로만 실행되며 `push` trigger가 없다. `service` job은 checkout 뒤 첫 step으로 architecture check를 하고 `uv sync --extra service --extra dev --frozen`, `uv run pytest tests -n 4 --dist worksteal`(dev extra의 pytest-xdist, public `ubuntu-latest` 4 vCPU에 맞춘 고정 워커 수), `uv run ruff check .`을 수행한다. SDK job은 `sdk/` working directory에서 별도 dependency/test/lint를 수행한다. 두 job 사이에 `needs`는 없다.
+- [`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml)(`Docker Build & Push`)은 push(main, dev), tag `v*`, `pull_request`(main, dev), `workflow_dispatch`로 실행된다. push/tag/dispatch에서는 `test` job이 `ci.yml`을 호출하는, pushed ref 또는 dispatch 실행당 유일한 테스트 실행이다. release tag push는 branch push로 이미 테스트된 SHA를 다시 테스트한다(같은 SHA의 dev push와 `v*` tag push가 별도 `push` event run이다). `build-and-push`는 `needs: test`와 `needs.test.result == 'success'`일 때만 API/worker 이미지를 빌드해 GHCR에 push한다. pull_request에서는 CI 자체의 pull_request run이 같은 merge ref에서 같은 `ci.yml`을 실행하므로 `test` job을 건너뛰고, 이미지 빌드는 테스트를 기다리지 않고 실행하되 push하지 않으며(`push: ${{ github.event_name != 'pull_request' }}`) GHCR에 로그인하지도 않는다(`Log in to GHCR` step의 `if: github.event_name != 'pull_request'`). 아무것도 발행하지 않는 PR 검증 빌드이므로 `AGENTS.md` 규칙 3에 따라 테스트와 병렬로 실행된다. 테스트가 실패하는 PR도 이 빌드 job을 실행한다. job token의 `packages: write`는 PR에서도 남아 있다(fork PR token은 read-only). 따라서 push commit의 check 이름은 `Docker Build & Push / test / ...`이고, PR에는 `CI / ...` check와 no-push 이미지 빌드 check가 붙는다.
+- [`tests/test_ci_workflow_contract.py`](tests/test_ci_workflow_contract.py)가 다음을 고정한다.
+  - trigger: trigger 집합, 두 워크플로우의 `pull_request` 설정 동일성, dedup `if:`, 모든 `*.yml`/`*.yaml` workflow의 trigger allowlist(`push`, `pull_request`, `workflow_dispatch`, `workflow_call`, `schedule`).
+  - 테스트 실행 횟수: `push`/`pull_request` trigger가 있는 workflow에서 테스트를 실행하는 job은 `ci.yml`의 두 job과 Docker Build & Push `test`뿐이다. 판정 기준은 `run:`에 `pytest`가 있거나 reusable workflow를 호출하는 job이다.
+  - 발행 게이팅: 빌드 게이팅 식, PR 빌드 no-push(두 build step의 `with` key 집합 고정과 PR에서 false인 `push`)와 no-login. 발행할 수 있는 job은 모두 `needs: test`와 게이트 식을 가져야 한다. 해당 job은 다음과 같다.
+    - 검토된 action allowlist 밖의 action이나 발행 명령을 쓴다. `push` 또는 input의 `push=true`/`type=registry`로 발행할 수 있는 build/bake action도 포함한다.
+    - write scope가 하나라도 있는 token이나 상속된 기본 token 권한을 쓴다.
+    - job 안이나 workflow-level `env`의 `${{ }}`에서 secret을 참조한다. dot·bracket·`toJSON`·`format` 인자 형태를 모두 포함한다.
+    - `ci.yml` 이외 reusable workflow를 호출한다.
+    - 판정 helper는 합성 workflow에 대한 parametrized 양성·음성 사례로 고정된다.
+  - `ci.yml` 구조: workflow·job·step key 집합, 즉 `if`, `continue-on-error`, `env`, `shell`, `working-directory`가 없고 `defaults`는 sdk job의 `working-directory: sdk`만 있다. 여기에 다음을 고정한다.
+    - `with` 없는 checkout
+    - action 이름과 정규화한 `run` 명령으로 이루어진 두 job의 순서 있는 step 목록
+    - setup-uv의 `python-version: '3.12'`와 `enable-cache: true`
+    - xdist 워커 수
+    - 직렬 entrypoint 유지: pytest가 읽은 설정 파일이 root `pyproject.toml`이고 그 `addopts`에 어떤 표기의 xdist 옵션도 없다.
+  - 보안: `run:`의 event payload 보간 금지(`github.event`/`github.head_ref`의 dot·bracket·함수 인자 형태), `ubuntu-latest` 전용 runner. runner group과 fork PR 승인 같은 settings 수준 통제는 owner 작업이며 `AGENTS.md` 규칙 10에 설정 경로와 2026-09-24 상태가 있다.
+  - 한계:
+    - 계약 테스트는 자신이 판정할 pytest 설정 아래에서 실행되므로 `addopts`나 `conftest.py`로 테스트를 건너뛰게 만드는 변경은 잡지 못한다.
+    - 계약 테스트는 `ci.yml`을 통해서만 실행되고 `actionlint`는 로컬 전용이다. 그래서 `ci.yml` 자신의 `pull_request` trigger를 제거·축소하는 PR은 merge 전에 잡히지 않는다. 이 회귀는 merge 뒤 branch push의 Docker Build & Push `test` job이 이미지 발행을 막을 때 드러난다.
+    - required status check는 아직 설정되지 않았다(`AGENTS.md` 규칙 11).
+- CI 성능 규정과 기록된 기준 수치는 [`AGENTS.md`](AGENTS.md)의 `CI 파이프라인 성능 규정`에 있다.
 
 ## Security boundaries
 
@@ -151,25 +173,28 @@ flowchart LR
 | system administrator | Keystone token + system-scope `admin` role assignment | `require_admin`만 전역 `resource_policies`를 읽고 쓸 수 있다. tenant admin은 global policy를 변경할 수 없다. |
 | Gateway VM agent | 서버별 bootstrap bearer | `/agent/register`, `/agent/desired-state`, `/agent/status`는 경로의 `server_id`와 bearer를 timing-safe 비교하고 불일치 시 fail-closed 401을 반환한다. |
 | anonymous health/discovery | 별도 자격증명 없음 | `/`, `/v1/`, `/v1/health`는 process 정보만 노출하며 tenant data를 반환하지 않는다. |
-| OpenStack control plane | Waygate service/admin password 설정으로 project connection | `get_admin_connection_for_project()`이 요청 project로 connection을 만들며 실제 credential은 소스 문서에 기록하지 않는다. |
+| OpenStack control plane | Waygate service/admin password 설정으로 project connection | `get_admin_connection_for_project()`이 요청 project로 connection을 만들며 실제 credential은 소스 문서에 기록하지 않는다. Agent callback base는 operator가 신뢰한 public endpoint만 사용하고 missing/loopback 값을 fail-closed 거부한다. |
 
 백엔드 DB에는 `agent_token_encrypted`, client private/preshared key 암호문만 저장하고, WireGuard server private key는 VM에서 생성되어 백엔드로 되돌아오지 않는다. client config 다운로드는 의도적으로 해당 client private key를 평문으로 반환하므로 인증된 소유권 검사를 우회해 외부 BFF나 로그에 흘리지 않아야 한다. VM bearer는 Redis에 평문 cache가 있을 수 있으나 durable 원천은 암호화된 MariaDB 값이며 토큰 자체를 이 문서에 기록하지 않는다. migration export는 passphrase로 다시 래핑되고 API 응답은 `Cache-Control: no-store`다.
 
 ## Development and verification
 
-2026-09-08 `uv run pytest tests`는 223건을 통과했고 `tests/test_architecture_guard.py` focused 13건과 guard 파일 lint도 통과했다. 아래 SDK와 실제 OpenStack/MariaDB/Redis/VM 경계는 별도 전제이며 실행하지 않은 계층을 통과로 표시하지 않는다.
+2026-09-24 upstream `dev`에서 로컬(macOS, Python 3.13.12와 3.12.13) 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 308건을 통과했다. pytest 보고 기준 3.13.12에서 직렬 8.6초와 4 워커 3.9초, 3.12.13에서 10.8초와 3.6초였다. focused boundary 98건, Kolla assets 5건, `uv run ruff check .`, SDK 21건과 SDK lint도 통과했다. 별도로 2026-09-21 lifecycle/network/config 변경에서 `uv run pytest tests -q` 256건 통과·opt-in live 1건 skip, focused `tests/test_waygate_network.py` 19건 통과 및 `uv run ruff check .` 통과가 기록되었다. 이는 각각 이전 snapshot의 로컬 결과이지 통합 candidate의 gate 결과가 아니다. 실제 OpenStack/MariaDB/Redis/VM 경계는 실행하지 않았다.
 
 ### Waygate service
 
 ```sh
 uv sync --extra service --extra dev --frozen
 uv run pytest tests/test_kolla_assets.py -q
-uv run pytest tests/test_waygate_jobs.py tests/test_waygate_provisioner.py tests/test_waygate_agent.py tests/test_waygate_clients.py tests/test_waygate_network.py -q
+uv run pytest tests/test_config.py tests/test_waygate_network.py tests/test_waygate_provisioner.py -q
 uv run pytest tests
+uv run pytest tests -n 4 --dist worksteal
+uv run pytest tests/test_ci_workflow_contract.py -q
 uv run ruff check .
+WAYGATE_RUN_LIVE=1 WAYGATE_LIVE_BASE_URL=https://waygate.example.com WAYGATE_LIVE_AUTH_TOKEN=... WAYGATE_LIVE_NETWORK_ID=... WAYGATE_LIVE_SUBNET_ID=... uv run pytest tests/test_live_waygate_lifecycle.py -q
 ```
 
-`tests/test_waygate_jobs.py`는 transaction/lease/retry/중복 delete를, `tests/test_waygate_provisioner.py`는 persisted policy snapshot과 VM userdata를, `tests/test_waygate_agent.py`는 bearer fail-closed/register/desired-state/status와 token durability를, `tests/test_waygate_clients.py`는 key/config/project ownership/IPAM을, `tests/test_waygate_network.py`는 attach/detach/SNAT contract를 정의한다. `tests/test_waygate_openapi.py`, `tests/test_waygate_feature_flag.py`, `tests/test_waygate_security.py`, `tests/test_waygate_migration.py`, `tests/test_migrations.py`는 discovery/security/migration/schema 경계를 추가로 정의한다. 실제 OpenStack, MariaDB, Redis, VM timer, WireGuard, KVM 실행은 별도 운영 전제조건이다.
+직렬 `uv run pytest tests`가 기본 entrypoint이고, CI는 같은 테스트를 pytest-xdist 4 워커로 실행한다. xdist 옵션은 `pyproject.toml`의 `addopts`가 아니라 `ci.yml`에만 있으므로 두 명령은 같은 테스트 수를 수집해야 한다. `tests/test_waygate_jobs.py`는 transaction/lease/retry/중복 delete를, `tests/test_waygate_provisioner.py`는 persisted policy snapshot·public callback fail-closed·VM userdata를, `tests/test_waygate_agent.py`는 server bearer와 token durability를, `tests/test_waygate_clients.py`는 key/config/project ownership/IPAM을, `tests/test_waygate_network.py`는 subnet-constrained port 생성·port-ID attach·rollback·detach/SNAT contract를 정의한다. `tests/test_config.py`는 API startup의 missing/loopback callback 거부를 고정하고, `tests/test_live_waygate_lifecycle.py`는 명시적 opt-in에서 create → ACTIVE → attach → detach → delete를 실제 배포에 실행한다. 기본 test suite에서는 live test를 skip하며 실제 터널 내부 인스턴스 도달성은 자동화하지 않는다. `tests/test_waygate_openapi.py`, `tests/test_waygate_feature_flag.py`, `tests/test_waygate_security.py`, `tests/test_waygate_migration.py`, `tests/test_migrations.py`는 discovery/security/migration/schema 경계를 추가로 정의한다. 실제 OpenStack, MariaDB, Redis, VM timer, WireGuard, KVM 실행은 별도 운영 전제조건이다.
 
 ### SDK
 
@@ -204,7 +229,7 @@ python3 scripts/check_architecture.py --staged
 | network attachment/NAT | [`waygate/api/attachments.py`](waygate/api/attachments.py), [`waygate/services/network.py`](waygate/services/network.py) | attachment state/CIDR/SNAT limits, `tests/test_waygate_network.py` |
 | resource policy 또는 server snapshot | [`waygate/services/resource_policies.py`](waygate/services/resource_policies.py), [`waygate/api/resource_policies.py`](waygate/api/resource_policies.py) | policy keys/constraints/snapshot 설명, `tests/test_waygate_provisioner.py` |
 | migration/export/import | [`waygate/api/migration.py`](waygate/api/migration.py), [`waygate/services/migration.py`](waygate/services/migration.py) | bundle/key/network recreation limit, `tests/test_waygate_migration.py` |
-| ORM/migration/config/deployment/CI | [`waygate/models/orm.py`](waygate/models/orm.py), [`waygate/migrations/`](waygate/migrations/), [`waygate/config.py`](waygate/config.py), [`docker/Dockerfile`](docker/Dockerfile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | schema/operations/verification sections와 migration ledger, CI/architecture hook |
+| ORM/migration/config/deployment/CI | [`waygate/models/orm.py`](waygate/models/orm.py), [`waygate/migrations/`](waygate/migrations/), [`waygate/config.py`](waygate/config.py), [`docker/Dockerfile`](docker/Dockerfile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml), [`AGENTS.md`](AGENTS.md)의 CI 파이프라인 성능 규정 | schema/operations/verification sections와 migration ledger, CI/architecture hook, [`tests/test_ci_workflow_contract.py`](tests/test_ci_workflow_contract.py), `actionlint`, CI 전후 실측 |
 | SDK path/method | [`sdk/waygate_sdk/proxy.py`](sdk/waygate_sdk/proxy.py), [`sdk/waygate_sdk/service.py`](sdk/waygate_sdk/service.py) | SDK contract와 [`sdk/tests/test_proxy.py`](sdk/tests/test_proxy.py) |
 | bugfix/refactor with no topology change | 실제 변경 source와 영향받은 test | 구조 영향이 없다는 이유를 Maintenance review summary에 남기고 source digest를 다시 stamp한다. |
 
@@ -230,9 +255,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "6bcfdf28673f5e3339237b7f0b34fc9f1ac7563ba85995f7710c7a008c631980",
-  "reviewed_at": "2026-09-17T15:44:47Z",
-  "summary": "Root package migration: shared-data Kolla role, docker/Dockerfile root context, transferred validator and role contracts from afterglow. Guard interpreter fix for system python3.9. 243 tests pass."
+  "source_sha256": "3871cf79c4bbd9eb5e0855eb34e3d37fc02ed615feed70eb8b248b206800c7c4",
+  "reviewed_at": "2026-09-24T15:30:41Z",
+  "summary": "Integrated origin/dev CI dedup, xdist, contract and image-gate documentation with staged callback fail-closed and subnet-port lifecycle changes; updated validation provenance and opt-in live limits. Reviewed config, API/worker startup, OpenStack adapters, provisioning, network and affected tests; no integrated tests, image builds or live deployment were run."
 }
 ```
 <!-- architecture-review:end -->

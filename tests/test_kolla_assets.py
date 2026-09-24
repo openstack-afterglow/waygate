@@ -58,7 +58,7 @@ def test_root_package_metadata_and_image_default():
 
     assert project["name"] == "waygate"
     assert project["version"] == "0.1.3"
-    assert project["requires-python"] == ">=3.12"
+    assert project["requires-python"] == ">=3.11"
     assert "dependencies" not in project
     assert "ansible" not in "\n".join(service_dependencies).lower()
     assert "fastapi==0.125.0" in service_dependencies

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -115,6 +117,35 @@ class Settings(BaseSettings):
         if self.os_insecure:
             return False
         return self.os_cacert or True
+
+
+def require_public_callback_base_url(settings: Settings) -> str:
+    """Return the configured VM callback origin or fail closed."""
+    callback_base_url = settings.waygate_callback_base_url.strip().rstrip("/")
+    if not callback_base_url:
+        raise RuntimeError("waygate.callback_base_url is required and must be reachable from gateway VMs")
+
+    try:
+        parsed = urlsplit(callback_base_url)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise RuntimeError("waygate.callback_base_url must be a valid HTTP(S) URL") from exc
+    if parsed.scheme not in {"http", "https"} or not hostname or parsed.username or parsed.password:
+        raise RuntimeError("waygate.callback_base_url must be an absolute HTTP(S) URL without credentials")
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("waygate.callback_base_url must not include a query or fragment")
+
+    normalized_host = hostname.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        raise RuntimeError("waygate.callback_base_url must be reachable from the gateway VM, not loopback")
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        pass
+    else:
+        if address.is_loopback or address.is_unspecified:
+            raise RuntimeError("waygate.callback_base_url must be reachable from the gateway VM, not loopback")
+    return callback_base_url
 
 
 @lru_cache

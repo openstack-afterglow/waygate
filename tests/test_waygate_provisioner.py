@@ -8,8 +8,8 @@ import pytest
 from waygate.services import provisioner as waygate_provisioner
 
 
-def _settings() -> SimpleNamespace:
-    return SimpleNamespace(waygate_callback_base_url="https://backend.example.com")
+def _settings(callback_base_url: str = "https://backend.example.com") -> SimpleNamespace:
+    return SimpleNamespace(waygate_callback_base_url=callback_base_url)
 
 
 def _record(*, floating_network_id: str | None = None) -> dict:
@@ -96,6 +96,21 @@ async def test_provision_uses_optional_persisted_floating_network():
 
     allocate_fip.assert_awaited_once_with(conn, "vm-123", "net-external-1")
     assert update_status.call_args_list[-1].kwargs["endpoint_ip"] == "203.0.113.9"
+
+
+@pytest.mark.asyncio
+async def test_provision_rejects_missing_callback_before_openstack_resources():
+    get_connection = MagicMock()
+    with (
+        patch("waygate.services.provisioner.get_settings", return_value=_settings("")),
+        patch("waygate.auth.get_admin_connection_for_project", get_connection),
+        patch("waygate.services.store.update_server_status", new=AsyncMock()) as update_status,
+    ):
+        await waygate_provisioner.provision_waygate_server("project-1", "server-1", "user-1", "tester")
+
+    get_connection.assert_not_called()
+    assert update_status.await_args.args[1] == "ERROR"
+    assert "callback_base_url" in update_status.await_args.args[2]
 
 
 @pytest.mark.asyncio

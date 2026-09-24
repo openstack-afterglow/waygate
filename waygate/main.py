@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from waygate.api import agent, attachments, clients, migration, resource_policies, servers
 from waygate.cache import close_cache
-from waygate.config import get_settings
+from waygate.config import get_settings, require_public_callback_base_url
 from waygate.db import close_db, init_db
 from waygate.models.schemas import HealthResponse, RootDiscoveryResponse, VersionDiscoveryResponse
 from waygate.rate_limit import limiter
@@ -24,6 +24,7 @@ _logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings = get_settings()
+    require_public_callback_base_url(settings)
     init_db(
         settings.database_url,
         pool_size=settings.database_pool_size,
