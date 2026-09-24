@@ -3,6 +3,7 @@
 Waygate는 OpenStack project별 WireGuard gateway VM과 client 설정을 관리하는 독립 FastAPI 서비스다. API는 Keystone project ownership을 적용하고, MariaDB durable job/secret records와 Redis 보조 cache를 사용한다.
 
 - [Architecture](ARCHITECTURE.md): 현재 구현, 책임 경계, 데이터 정본, 운영 한계
+- [0.1.4 release notes](RELEASE_NOTES.md): changes since v0.1.2, unverified live lifecycle, validation and manual wheel/GitHub Release steps.
 - [Package manifest](pyproject.toml): `waygate` distribution ships the Kolla role as wheel shared data at `share/kolla-ansible/ansible/roles/waygate`; install the runtime with the `service` extra. The wheel has no Kolla-Ansible dependency.
 - [CI](.github/workflows/ci.yml): architecture check, service/SDK test 및 lint workflow. `pull_request`에서 직접 실행되고, push/tag에서는 [Docker Build & Push](.github/workflows/docker-build.yml)가 이 workflow를 호출해 테스트 성공 시에만 이미지를 발행한다.
 - [Dockerfile](docker/Dockerfile): API와 worker image targets

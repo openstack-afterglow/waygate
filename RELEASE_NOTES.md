@@ -1,0 +1,24 @@
+# Waygate 0.1.4 release notes
+
+Changes since `v0.1.2` (`0257ac17bb2baafc684aa065ee879fd50c324ef1`). This is a release candidate until the reviewed commit is tagged, the gates pass, and artifacts are published.
+
+## Changes
+
+- Unified the Kolla-Ansible Waygate role into the root `waygate` distribution as wheel shared data at `share/kolla-ansible/ansible/roles/waygate`. Kolla-Ansible is not a runtime or wheel dependency. The service can still be installed with the `service` extra; the SDK remains a separately versioned distribution (`waygate-sdk` 0.1.2).
+- Relaxed the root Python requirement to `>=3.11` for the Kolla control node, while CI and the runtime image use Python 3.12.
+- API and worker startup now reject missing or loopback/unspecified `waygate.callback_base_url` rather than silently substituting an internal name that a gateway VM cannot reach. The provisioning path validates the public callback before creating cloud resources. Operators must supply a reachable public URL.
+- Network attachment now creates a Neutron port constrained to the selected subnet (`fixed_ips`), attaches that port by ID to the Nova VM, and records it for detach/rollback. Failed port cleanup retains an `ERROR` attachment for recovery; the optional live lifecycle covers create, attach, detach, and delete but has not been run for this release candidate.
+- CI runs the service suite with four pytest-xdist workers. Push/tag/dispatch image publication waits for the reusable service-and-SDK checks; a PR builds images without publishing them, while PR CI runs separately. The contract checks guard publish gating, runner use, unsafe workflow expressions, and trigger shape. A release tag produces the `0.1.4` semver image tags for both `ghcr.io/openstack-afterglow/waygate-api` and `ghcr.io/openstack-afterglow/waygate-worker` after the gate passes.
+
+## Compatibility and operational limits
+
+The root manifest, runtime `__version__`, root `uv.lock`, and packaged Kolla registry-image default are 0.1.4. The source-build checkout remains pinned to its existing immutable commit `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03`; it is not a synonym for the 0.1.4 release. Source-mode operators must explicitly select a reviewed, immutable release commit if they need the new code. The role's registry refs still accept full SHA-256 digests or version tags, reject `latest`, and do not change reference validation. Pin both deployed images to their published digests for immutable deployments; do not assume a tag is immutable.
+
+No live OpenStack/MariaDB/Redis/gateway VM lifecycle has been verified for this candidate. The opt-in lifecycle test requires an authorized deployment, a Keystone token, network and optional subnet IDs; it has not established data-plane connectivity. `/v1/health` is only a process health check. There is no OpenSpec tree in this repository and no OpenSpec artifact to synchronize.
+
+## Maintainer validation and manual publication (not performed here)
+
+1. On the reviewed release commit, run `python3 scripts/check_architecture.py` and, after staging only the intended files, `python3 scripts/check_architecture.py --staged`. Run `uv sync --extra service --extra dev --frozen`, `uv run pytest tests`, `uv run pytest tests -n 4 --dist worksteal`, `uv run ruff check .`; in `sdk/`, run `uv sync --all-extras --frozen`, `uv run pytest`, `uv run ruff check .`. The Kolla wheel installation check is in `tests/test_kolla_assets.py`. Do not count these as live proof.
+2. Build and exercise the two image targets via the repository's Docker Build & Push workflow and its declared architecture, then deploy through the authorized Kolla path, confirm service readiness and the live lifecycle. Only an authorized environment with working OpenStack/MariaDB/Redis and a VM-reachable callback URL can close the live lifecycle gap. Capture the API/worker image digests; prefer digest refs in deployment.
+3. After review and gates, land the release commit, create the annotated `v0.1.4` tag on that exact commit (`git tag -a v0.1.4 -m 'Waygate 0.1.4'`), and push the commit and tag (`git push origin <release-branch>` followed by `git push origin v0.1.4`). Wait for the tag-triggered Docker Build & Push run to pass and confirm both `0.1.4` image tags/digests in GHCR. Do not move the tag after publication.
+4. From the tagged source, run `uv build --wheel --out-dir dist/0.1.4`. Inspect the resulting `waygate-0.1.4-py3-none-any.whl` metadata and its `share/kolla-ansible/ansible/roles/waygate` payload (or run the wheel-install check in step 1); verify the artifact is from the tagged commit. The workflow does **not** create a GitHub Release or attach a wheel. A maintainer must explicitly run `gh release create v0.1.4 dist/0.1.4/waygate-0.1.4-py3-none-any.whl --verify-tag --title 'Waygate 0.1.4' --notes-file RELEASE_NOTES.md` and confirm the release has the wheel asset. This is a manual GitHub asset upload, not a PyPI publish or a new CI workflow.
