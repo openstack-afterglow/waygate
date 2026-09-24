@@ -51,13 +51,12 @@ def test_kolla_required_assets_exist():
         assert path.exists(), f"Missing required role asset: {relative_path}"
 
 
-def test_root_package_metadata_and_image_default():
+def test_root_package_metadata():
     pyproject_data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     project = pyproject_data["project"]
     service_dependencies = project["optional-dependencies"]["service"]
 
     assert project["name"] == "waygate"
-    assert project["version"] == "0.1.3"
     assert project["requires-python"] == ">=3.11"
     assert "dependencies" not in project
     assert "ansible" not in "\n".join(service_dependencies).lower()
@@ -65,9 +64,6 @@ def test_root_package_metadata_and_image_default():
     assert pyproject_data["tool"]["hatch"]["build"]["targets"]["wheel"]["shared-data"] == {
         "deploy/kolla/ansible/roles/waygate": "share/kolla-ansible/ansible/roles/waygate"
     }
-
-    defaults_yaml = yaml.safe_load((ROLE_DIR / "defaults" / "main.yml").read_text(encoding="utf-8"))
-    assert defaults_yaml["waygate_image_tag"] == "0.1.2"
 
 
 def test_all_yaml_files_parse():

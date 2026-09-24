@@ -6,12 +6,12 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 - Repository: [openstack-afterglow/waygate](https://github.com/openstack-afterglow/waygate)
 - 분석한 branch: `dev`; 분석한 작업 트리의 소스 기준일은 이 문서 작성 시점이다.
-- package versions: root distribution and Python runtime package `waygate` `0.1.3` (`pyproject.toml`, `waygate/__init__.py`); `waygate-sdk` remains `0.1.2` (`sdk/pyproject.toml`). The Kolla role's `waygate_image_tag` remains `0.1.2`, the known published runtime image default. Package Python `>=3.11` (CI and runtime image use 3.12), FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
+- package versions: root distribution and Python runtime package `waygate` `0.1.4` (`pyproject.toml`, `waygate/__init__.py`, root `uv.lock`); `waygate-sdk` remains independently versioned at `0.1.2` (`sdk/pyproject.toml`, `sdk/uv.lock`). The packaged Kolla role defaults to `waygate_image_tag: "0.1.4"` for registry images; its source-build checkout stays pinned to the existing immutable commit `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03` and is not retagged to an uncreated release commit. Package Python `>=3.11` (CI and runtime image use 3.12), FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
 - 1분 책임 요약: `waygate-api`는 Keystone 인증·project 소유권·API를, `waygate-worker`는 durable provision/delete job을, MariaDB는 정본 레코드와 암호화 자격증명을, Redis는 상태·토큰의 보조 캐시를 소유한다. 실제 WireGuard private key와 NAT 적용은 게이트웨이 VM의 agent가 소유한다.
 
 ## Development status
 
-상태와 검증 수준은 서로 다른 축이다. 2026-09-24 upstream `dev`에서 로컬 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 308건(architecture guard 13건, CI 형태 계약 65건 포함)을 통과했다. 별도로 2026-09-21 lifecycle/network/config 변경에 대해 `uv run pytest tests -q`에서 256건 통과·opt-in live 1건 skip, `uv run ruff check .` 통과가 기록되었다. 이 통합 candidate 자체의 gate 결과는 아직 없다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
+상태와 검증 수준은 서로 다른 축이다. 2026-09-24 upstream `dev`에서 로컬 직렬 `uv run pytest tests`와 CI 형태 `uv run pytest tests -n 4 --dist worksteal`이 각각 308건(architecture guard 13건, CI 형태 계약 65건 포함)을 통과했다. 별도로 2026-09-21 lifecycle/network/config 변경에 대해 `uv run pytest tests -q`에서 256건 통과·opt-in live 1건 skip, `uv run ruff check .` 통과가 기록되었다. 이 0.1.4 release metadata candidate 자체의 test/build/deployment gate 결과는 없다. 실제 OpenStack·MariaDB·Redis·gateway VM/WireGuard 환경은 실행하지 않았다.
 
 | 기능 | Implementation | Verification evidence | Current limit | Source |
 |---|---|---|---|---|
@@ -165,6 +165,10 @@ flowchart LR
     - required status check는 아직 설정되지 않았다(`AGENTS.md` 규칙 11).
 - CI 성능 규정과 기록된 기준 수치는 [`AGENTS.md`](AGENTS.md)의 `CI 파이프라인 성능 규정`에 있다.
 
+### 0.1.4 release boundary
+
+[`RELEASE_NOTES.md`](RELEASE_NOTES.md)는 `v0.1.2` 이후 변경과 필요한 검증·수동 발행 순서를 기록한다. `v0.1.4` tag push는 기존 Docker Build & Push workflow에서 semver `0.1.4` API/worker 이미지를 발행할 수 있지만, GitHub Release와 wheel asset은 만들지 않는다. Maintainer가 동일한 검증된 tag source에서 `uv build --wheel --out-dir dist/0.1.4`를 실행해 Kolla shared-data payload를 확인하고 GitHub Release에 수동 업로드해야 한다. 이 문서의 Kolla default registry tag는 `0.1.4`이며, immutable 배포에는 각 image의 발행된 digest를 명시적으로 고정한다. 기존 source-build `waygate_source_version` SHA pin과 remote digest/version-tag validator는 변경하지 않았다. 실제 image build·배포·live lifecycle은 이 release metadata 작업에서 실행하지 않았으며 검증 후에만 release를 발행한다.
+
 ## Security boundaries
 
 | 주체/경계 | 자격증명과 권한 | 보호 규칙 |
@@ -255,9 +259,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "3871cf79c4bbd9eb5e0855eb34e3d37fc02ed615feed70eb8b248b206800c7c4",
-  "reviewed_at": "2026-09-24T15:30:41Z",
-  "summary": "Integrated origin/dev CI dedup, xdist, contract and image-gate documentation with staged callback fail-closed and subnet-port lifecycle changes; updated validation provenance and opt-in live limits. Reviewed config, API/worker startup, OpenStack adapters, provisioning, network and affected tests; no integrated tests, image builds or live deployment were run."
+  "source_sha256": "160a03bb5651a0a16ea0a52e2ff2c4fb253c46bd47a430684c30c37c90f63e81",
+  "reviewed_at": "2026-09-24T16:25:01Z",
+  "summary": "Reviewed root pyproject.toml and uv.lock 0.1.4, runtime __version__, packaged Kolla image tag, incidental version-pinned assertions removed from tests/test_kolla_assets.py, CI semver tags and release documentation; metadata-only change, no topology or runtime behavior change. SDK and immutable source SHA remain independent. Tests, image builds, deployment and live lifecycle were not run."
 }
 ```
 <!-- architecture-review:end -->
