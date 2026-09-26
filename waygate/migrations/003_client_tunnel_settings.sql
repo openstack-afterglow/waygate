@@ -1,0 +1,2 @@
+ALTER TABLE waygate_clients ADD COLUMN IF NOT EXISTS mtu INT NULL;
+ALTER TABLE waygate_clients ADD COLUMN IF NOT EXISTS persistent_keepalive INT NOT NULL DEFAULT 25;

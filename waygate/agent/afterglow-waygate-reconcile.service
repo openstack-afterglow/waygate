@@ -1,0 +1,10 @@
+[Unit]
+Description=Waygate reconcile (desired-state sync + status report)
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/afterglow/waygate_agent.py reconcile
+StandardOutput=journal
+StandardError=journal

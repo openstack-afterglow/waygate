@@ -96,6 +96,10 @@ class WaygateServerInfo(BaseModel):
     dns: str | None = None
     mtu: int | None = None
     server_public_key: str | None = None
+    agent_install_mode: str = "cloud-init"
+    agent_source: str | None = None
+    agent_token_issued_at: str | None = None
+    agent_token_rotation_pending: bool = False
     created_at: str | None = None
     updated_at: str | None = None
     # Redis 최신 상태 병합 (에이전트가 마지막으로 보고한 시각/피어 수)
@@ -109,7 +113,10 @@ class WaygateClientCreateRequest(BaseModel):
     name: str
     allowed_ips: list[str] | None = Field(default=None, max_length=20)
     dns: str | None = None
+    mtu: int | None = Field(default=None, ge=576, le=9000, strict=True)
+    persistent_keepalive: int = Field(default=25, ge=0, le=65535, strict=True)
 
+    model_config = {"extra": "forbid"}
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
@@ -137,28 +144,50 @@ class WaygateClientCreateRequest(BaseModel):
     @classmethod
     def validate_dns(cls, v: str | None) -> str | None:
         if v is None or v == "":
-            return v
-        for host in v.split(","):
-            host = host.strip()
-            if not host or not _DNS_HOST_RE.match(host):
-                raise ValueError(f"dns 값 '{v}' 형식이 유효하지 않습니다")
-        return v
+            return None
+        hosts = [host.strip() for host in v.split(",")]
+        if len(hosts) > 2 or len(v) > 255:
+            raise ValueError("dns 값은 최대 두 개의 주소여야 합니다")
+        for host in hosts:
+            if not host or not _DNS_HOST_RE.fullmatch(host):
+                raise ValueError("dns 값 형식이 유효하지 않습니다")
+            if ":" in host:
+                try:
+                    ipaddress.IPv6Address(host)
+                except ValueError as exc:
+                    raise ValueError("dns IPv6 주소 형식이 유효하지 않습니다") from exc
+        return ", ".join(hosts)
 
 
 class WaygateClientUpdateRequest(BaseModel):
-    """VPN 클라이언트 수정 요청 (enable/disable, 이름 변경)."""
+    """VPN 클라이언트 수정 요청. 생략된 값은 유지하고 dns/mtu 의 null은 초기화한다."""
 
     name: str | None = None
     enabled: bool | None = None
+    dns: str | None = None
+    mtu: int | None = Field(default=None, ge=576, le=9000, strict=True)
+    persistent_keepalive: int | None = Field(default=None, ge=0, le=65535, strict=True)
+
+    model_config = {"extra": "forbid"}
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        if not _NAME_RE.match(v):
-            raise ValueError("이름은 영문/숫자로 시작하고, 영문·숫자·하이픈·언더스코어만 허용됩니다 (최대 63자)")
+    def validate_name(cls, v: str | None) -> str:
+        if v is None or not _NAME_RE.fullmatch(v):
+            raise ValueError("이름은 영문/숫자로 시작하고 영문·숫자·하이픈·언더스코어만 허용됩니다")
         return v
+
+    @field_validator("enabled", "persistent_keepalive")
+    @classmethod
+    def reject_null(cls, v: bool | int | None) -> bool | int:
+        if v is None:
+            raise ValueError("null을 사용할 수 없습니다")
+        return v
+
+    @field_validator("dns")
+    @classmethod
+    def validate_dns(cls, v: str | None) -> str | None:
+        return WaygateClientCreateRequest.validate_dns(v)
 
 
 class WaygateClientInfo(BaseModel):
@@ -173,11 +202,15 @@ class WaygateClientInfo(BaseModel):
     tunnel_ip: str
     allowed_ips: list[str] = []
     dns: str | None = None
+    mtu: int | None = None
+    persistent_keepalive: int = 25
+    psk_enabled: bool = False
     created_at: str | None = None
     updated_at: str | None = None
     # Redis 상태 병합
     online: bool | None = None
     last_handshake_at: str | None = None
+    last_reported_at: str | None = None
     rx_bytes: int | None = None
     tx_bytes: int | None = None
 
@@ -305,6 +338,7 @@ class WaygateAgentStatusReport(BaseModel):
 
     peers: list[WaygateAgentPeerState] = Field(default_factory=list, max_length=1000)
     reported_at: str | None = None
+    agent_source: Literal["cloud-init", "prebuilt"] | None = None
 
 
 class WaygateAgentDesiredStatePeer(BaseModel):
@@ -323,3 +357,4 @@ class WaygateAgentDesiredState(BaseModel):
     # Phase 2: 연결된 테넌트 네트워크 CIDR 목록. 에이전트가 각 CIDR 로 향하는 tunnel_cidr
     # 트래픽을 해당 NIC 로 SNAT(MASQUERADE)한다.
     nat_networks: list[str] = []
+    next_token: str | None = None

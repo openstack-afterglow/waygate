@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from fakeredis.aioredis import FakeRedis
 
 from waygate.scripts import cutover
 
@@ -85,56 +85,35 @@ def test_ciphertext_verification_requires_identical_copy_and_valid_key(monkeypat
         cutover._verify_ciphertext(source, [{"id": "client-1", "private_key_encrypted": "changed"}])
 
 
-class _FakeRedis:
-    def __init__(self, values: dict[bytes, tuple[bytes, int]]):
-        self.values = values
-        self.restored: list[tuple[bytes, int, bytes, bool]] = []
+@pytest.mark.asyncio
+async def test_redis_migration_preserves_status_and_excludes_credentials(monkeypatch):
+    source, destination = FakeRedis(), FakeRedis()
+    monkeypatch.setattr(cutover.Redis, "from_url", lambda url: source if url == "source" else destination)
+    await source.set("afterglow:waygate:status:one", b"status", px=30000)
+    await source.set("afterglow:waygate:srvtoken:one", b"obsolete-credential")
 
-    async def scan_iter(self, *, match: str) -> AsyncIterator[bytes]:
-        prefix = match.removesuffix("*").encode()
-        for key in self.values:
-            if key.startswith(prefix):
-                yield key
+    assert await cutover.migrate_redis("source", "destination", apply=False) == {"afterglow:waygate:status:*": 1}
+    assert await destination.get("afterglow:waygate:status:one") is None
 
-    async def dump(self, key: bytes) -> bytes | None:
-        item = self.values.get(key)
-        return item[0] if item else None
-
-    async def pttl(self, key: bytes) -> int:
-        item = self.values.get(key)
-        return item[1] if item else -2
-
-    async def restore(self, key: bytes, ttl: int, payload: bytes, *, replace: bool) -> None:
-        self.restored.append((key, ttl, payload, replace))
+    assert await cutover.migrate_redis("source", "destination", apply=True) == {"afterglow:waygate:status:*": 1}
+    assert await destination.get("afterglow:waygate:status:one") == b"status"
+    assert 0 < await destination.pttl("afterglow:waygate:status:one") <= 30000
+    assert await destination.get("afterglow:waygate:srvtoken:one") is None
+    await source.close()
+    await destination.close()
 
 
 @pytest.mark.asyncio
-async def test_redis_copy_preserves_payload_ttl_and_is_dry_run_safe():
-    source = _FakeRedis(
-        {
-            b"afterglow:waygate:srvtoken:one": (b"dump-one", 3000),
-            b"afterglow:waygate:status:one": (b"dump-status", -1),
-        }
-    )
-    destination = _FakeRedis({})
+async def test_redis_migration_rejects_unexpected_destination_status(monkeypatch):
+    source, destination = FakeRedis(), FakeRedis()
+    monkeypatch.setattr(cutover.Redis, "from_url", lambda url: source if url == "source" else destination)
+    await source.set("afterglow:waygate:status:one", b"status")
+    await destination.set("afterglow:waygate:status:unexpected", b"other-server")
 
-    count = await cutover._copy_redis_pattern(
-        source,
-        destination,
-        "afterglow:waygate:srvtoken:*",
-        apply=False,
-    )
-    assert count == 1
-    assert destination.restored == []
-
-    count = await cutover._copy_redis_pattern(
-        source,
-        destination,
-        "afterglow:waygate:status:*",
-        apply=True,
-    )
-    assert count == 1
-    assert destination.restored == [(b"afterglow:waygate:status:one", 0, b"dump-status", True)]
+    with pytest.raises(cutover.CutoverError, match="key count mismatch"):
+        await cutover.migrate_redis("source", "destination", apply=True)
+    assert await destination.get("afterglow:waygate:status:unexpected") == b"other-server"
+    await destination.close()
 
 
 def test_database_url_normalization_and_backend_rejection():

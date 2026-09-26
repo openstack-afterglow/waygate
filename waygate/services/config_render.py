@@ -1,28 +1,41 @@
-"""WireGuard VPN 클라이언트 `.conf` 렌더 + 에이전트 desired-state 렌더 + cloud-init 렌더.
-
-Jinja2 Environment 설정은 app/services/cloudinit.py 를 그대로 미러링한다
-(shlex_quote 필터 등록, autoescape=False, base64 출력).
-"""
+"""Render client configs, agent desired state, and config-driven cloud-init userdata."""
 
 import base64
+import ipaddress
+import json
 import re
-import shlex
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from waygate.services.ipam import server_tunnel_ip
+
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
+AGENT_DIR = Path(__file__).parent.parent / "agent"
+AGENT_FILES: tuple[tuple[str, str, str], ...] = (
+    ("waygate_agent.py", "/opt/afterglow/waygate_agent.py", "0750"),
+    ("afterglow-waygate-reconcile.service", "/etc/systemd/system/afterglow-waygate-reconcile.service", "0644"),
+    ("afterglow-waygate-reconcile.timer", "/etc/systemd/system/afterglow-waygate-reconcile.timer", "0644"),
+    ("99-afterglow-wg-forward.conf", "/etc/sysctl.d/99-afterglow-wg-forward.conf", "0644"),
+)
+
+
+def agent_packages() -> list[str]:
+    return [line for raw in agent_asset("packages.txt").splitlines() if (line := raw.strip()) and not line.startswith("#")]
+
+
+def agent_asset(name: str) -> str:
+    return (AGENT_DIR / name).read_text(encoding="utf-8")
+
 
 _jinja = Environment(
     loader=FileSystemLoader(str(TEMPLATE_DIR)),
     undefined=StrictUndefined,
     trim_blocks=True,
     lstrip_blocks=True,
-    # 출력은 YAML/Bash/Python 이라 HTML autoescape 는 의미 없음 — 명시적으로 비활성하고,
-    # 모든 사용자 입력은 템플릿 측에서 반드시 `| shlex_quote` 를 거치도록 한다.
+    # Inputs are validated and serialized as JSON; executable assets contain no interpolation.
     autoescape=False,
 )
-_jinja.filters["shlex_quote"] = shlex.quote
 
 # 서버 이름은 이미 WaygateServerCreateRequest 에서 화이트리스트 검증되지만, cloud-init
 # 렌더 직전 심층 방어로 재검증한다 (개행/쉘 메타문자 → YAML 구조 파괴 차단).
@@ -38,6 +51,7 @@ def _validate_cloudinit_inputs(
     status_url: str,
     bootstrap_token: str,
     listen_port: int,
+    tunnel_cidr: str,
 ) -> None:
     """VPN cloud-init 템플릿 보간 값 형식 검증. 불일치 시 ValueError."""
     if not _NAME_RE.match(server_name):
@@ -53,6 +67,7 @@ def _validate_cloudinit_inputs(
         raise ValueError("유효하지 않은 bootstrap_token 형식")
     if not (1 <= listen_port <= 65535):
         raise ValueError(f"유효하지 않은 listen_port: {listen_port}")
+    ipaddress.ip_network(tunnel_cidr, strict=False)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +85,9 @@ def render_client_conf(
     listen_port: int,
     allowed_ips: list[str],
     nat_cidrs: list[str] | None = None,
+    mtu: int | None = None,
+    persistent_keepalive: int = 25,
+    preshared_key: str | None = None,
 ) -> str:
     """클라이언트용 WireGuard `.conf` 파일 텍스트를 렌더한다.
 
@@ -87,14 +105,18 @@ def render_client_conf(
         f"PrivateKey = {private_key}",
         f"Address = {tunnel_ip}/32",
     ]
+    if mtu is not None:
+        lines.append(f"MTU = {mtu}")
     if dns:
         lines.append(f"DNS = {dns}")
     lines.append("")
     lines.append("[Peer]")
     lines.append(f"PublicKey = {server_public_key}")
+    if preshared_key:
+        lines.append(f"PresharedKey = {preshared_key}")
     lines.append(f"Endpoint = {endpoint_ip}:{listen_port}")
     lines.append(f"AllowedIPs = {', '.join(merged)}")
-    lines.append("PersistentKeepalive = 25")
+    lines.append(f"PersistentKeepalive = {persistent_keepalive}")
     lines.append("")
     return "\n".join(lines)
 
@@ -110,6 +132,7 @@ def render_agent_desired_state(
     tunnel_cidr: str,
     clients: list[dict],
     nat_networks: list[str] | None = None,
+    next_token: str | None = None,
 ) -> dict:
     """에이전트가 폴링하는 desired-state dict를 렌더한다.
 
@@ -134,6 +157,7 @@ def render_agent_desired_state(
         "tunnel_cidr": tunnel_cidr,
         "peers": peers,
         "nat_networks": list(nat_networks or []),
+        "next_token": next_token,
     }
 
 
@@ -146,25 +170,35 @@ def render_agent_userdata(
     *,
     server_name: str,
     listen_port: int,
+    tunnel_cidr: str,
     register_url: str,
     desired_state_url: str,
     status_url: str,
     bootstrap_token: str,
-    reconcile_interval_seconds: int = 15,
+    install_packages: bool,
 ) -> str:
-    """Waygate 에이전트 cloud-init YAML을 렌더하고 base64 인코딩해 반환한다.
-
-    Nova user_data 는 base64 인코딩된 문자열을 기대한다.
-    """
-    _validate_cloudinit_inputs(server_name, register_url, desired_state_url, status_url, bootstrap_token, listen_port)
-
+    """Render Nova's base64 cloud-init payload for stock or prebuilt gateway images."""
+    _validate_cloudinit_inputs(
+        server_name, register_url, desired_state_url, status_url, bootstrap_token, listen_port, tunnel_cidr
+    )
+    network = ipaddress.ip_network(tunnel_cidr, strict=False)
+    agent_config = {
+        "register_url": register_url,
+        "desired_state_url": desired_state_url,
+        "status_url": status_url,
+        "bootstrap_token": bootstrap_token,
+        "listen_port": listen_port,
+        "tunnel_cidr": tunnel_cidr,
+        "tunnel_address": f"{server_tunnel_ip(tunnel_cidr)}/{network.prefixlen}",
+        "agent_install_mode": "cloud-init" if install_packages else "prebuilt",
+    }
     yaml_str = _jinja.get_template("waygate_agent.yaml.j2").render(
         server_name=server_name,
-        listen_port=listen_port,
-        register_url=register_url,
-        desired_state_url=desired_state_url,
-        status_url=status_url,
-        bootstrap_token=bootstrap_token,
-        reconcile_interval_seconds=reconcile_interval_seconds,
+        install_packages=install_packages,
+        packages=agent_packages(),
+        agent_config_json=json.dumps(agent_config, separators=(",", ":")),
+        agent_files=[
+            {"target": target, "mode": mode, "content": agent_asset(name)} for name, target, mode in AGENT_FILES
+        ],
     )
     return base64.b64encode(yaml_str.encode()).decode()

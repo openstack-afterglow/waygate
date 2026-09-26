@@ -1,11 +1,12 @@
 """Waygate 백업/마이그레이션(Phase 3) — 패스프레이즈 래핑 + export/import 서비스 + API.
 
 - crypto: wrap/unwrap 왕복, 잘못된 패스프레이즈 fail-closed.
-- export: 서버 private key 미포함, 클라이언트 키는 래핑되어 포함.
-- import: 왕복 재생성(키 보존 → public key 일치), 패스프레이즈 오류/악성 이름 스킵.
+- export: 서버 private key 미포함, 클라이언트 private key/PSK 는 래핑되어 포함.
+- import: 키/터널 설정 보존, 레거시 번들 호환, 잘못된 설정/PSK 거부.
 - API: export/import 소유권(IDOR), 패스프레이즈 최소 길이 검증.
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -108,6 +109,41 @@ class TestExportBundle:
         # 래핑을 풀면 원본 private key 복원
         assert waygate_migration.unwrap_with_passphrase(c["private_key_wrapped"], "passphrase-1234") == priv
 
+    @pytest.mark.asyncio
+    async def test_export_wraps_psk_and_client_settings_without_plaintext(self, monkeypatch):
+        rec, priv, _ = _make_client()
+        psk = waygate_keys.generate_preshared_key()
+        rec.update(
+            dns="1.1.1.1, 8.8.8.8",
+            mtu=1420,
+            persistent_keepalive=0,
+            preshared_key_encrypted=k3s_crypto.encrypt_wg_client_key(psk),
+        )
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+
+        entry = bundle["clients"][0]
+        assert bundle["version"] == 1
+        assert (entry["dns"], entry["mtu"], entry["persistent_keepalive"]) == ("1.1.1.1, 8.8.8.8", 1420, 0)
+        assert waygate_migration.unwrap_with_passphrase(entry["preshared_key_wrapped"], "pw-abcdefgh") == psk
+        serialized = json.dumps(bundle)
+        assert priv not in serialized
+        assert psk not in serialized
+        assert rec["preshared_key_encrypted"] not in serialized
+
+    @pytest.mark.asyncio
+    async def test_export_skips_client_with_undecryptable_psk(self, monkeypatch):
+        rec, _, _ = _make_client()
+        rec["preshared_key_encrypted"] = "corrupt"
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+
+        assert bundle["clients"] == []
+
 
 # ---------------------------------------------------------------------------
 # import
@@ -121,6 +157,8 @@ class TestImportBundle:
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
         bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+        bundle["clients"][0].pop("mtu")
+        bundle["clients"][0].pop("persistent_keepalive")
 
         created: list[dict] = []
 
@@ -138,6 +176,36 @@ class TestImportBundle:
         stored = created[0]
         assert stored["public_key"] == pub
         assert k3s_crypto.decrypt_wg_client_key(stored["private_key_encrypted"]) == priv
+        assert "preshared_key_wrapped" not in bundle["clients"][0]
+        assert stored["preshared_key_encrypted"] is None
+        assert stored["mtu"] is None
+        assert stored["persistent_keepalive"] == 25
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_preserves_existing_psk_and_tunnel_settings(self, monkeypatch):
+        rec, priv, pub = _make_client()
+        psk = waygate_keys.generate_preshared_key()
+        rec.update(
+            dns="9.9.9.9",
+            mtu=9000,
+            persistent_keepalive=65535,
+            preshared_key_encrypted=k3s_crypto.encrypt_wg_client_key(psk),
+        )
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+        create = AsyncMock()
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
+
+        result = await waygate_migration.import_bundle("test-project-123", _server(id="srv-2"), bundle, "pw-abcdefgh")
+
+        assert result == {"imported": 1, "skipped": []}
+        stored = create.await_args.args[3]
+        assert stored["public_key"] == pub
+        assert k3s_crypto.decrypt_wg_client_key(stored["private_key_encrypted"]) == priv
+        assert k3s_crypto.decrypt_wg_client_key(stored["preshared_key_encrypted"]) == psk
+        assert (stored["dns"], stored["mtu"], stored["persistent_keepalive"]) == ("9.9.9.9", 9000, 65535)
 
     @pytest.mark.asyncio
     async def test_wrong_passphrase_skips_client(self, monkeypatch):
@@ -229,6 +297,144 @@ class TestImportBundle:
         ips = sorted(c["tunnel_ip"] for c in created)
         assert ips == ["10.8.0.2", "10.8.0.3"]  # 서로 다른 순차 IP
         assert len(set(ips)) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("dns", "not a dns address"),
+            ("mtu", 575),
+            ("mtu", 9001),
+            ("mtu", "1420"),
+            ("persistent_keepalive", -1),
+            ("persistent_keepalive", 65536),
+            ("persistent_keepalive", "25"),
+            ("persistent_keepalive", None),
+        ],
+    )
+    async def test_import_skips_invalid_client_settings(self, monkeypatch, field, value):
+        priv, pub = waygate_keys.generate_keypair()
+        entry = {
+            "name": "laptop",
+            "public_key": pub,
+            "private_key_wrapped": waygate_migration.wrap_with_passphrase(priv, "pw-abcdefgh"),
+            field: value,
+        }
+        create = AsyncMock()
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
+
+        result = await waygate_migration.import_bundle(
+            "test-project-123", _server(), {"version": 1, "clients": [entry]}, "pw-abcdefgh"
+        )
+
+        assert result["imported"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["name"] == "laptop"
+        assert "검증 오류" in result["skipped"][0]["reason"]
+        create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("bad_psk", "reason"),
+        [
+            ("not-base64!", "클라이언트 PSK 형식이 유효하지 않습니다"),
+            ("YQ==", "클라이언트 PSK 형식이 유효하지 않습니다"),
+            (None, "클라이언트 PSK 래핑 형식이 유효하지 않습니다"),
+            ("wgm1:invalid", "패스프레이즈가 올바르지 않거나 번들이 손상되었습니다"),
+        ],
+    )
+    async def test_import_skips_invalid_wrapped_psk(self, monkeypatch, bad_psk, reason):
+        priv, pub = waygate_keys.generate_keypair()
+        entry = {
+            "name": "laptop",
+            "public_key": pub,
+            "private_key_wrapped": waygate_migration.wrap_with_passphrase(priv, "pw-abcdefgh"),
+            "preshared_key_wrapped": (
+                waygate_migration.wrap_with_passphrase(bad_psk, "pw-abcdefgh")
+                if bad_psk not in (None, "wgm1:invalid")
+                else bad_psk
+            ),
+        }
+        create = AsyncMock()
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
+
+        result = await waygate_migration.import_bundle(
+            "test-project-123", _server(), {"version": 1, "clients": [entry]}, "pw-abcdefgh"
+        )
+
+        assert result["imported"] == 0
+        assert result["skipped"] == [{"name": "laptop", "reason": reason}]
+        create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_import_rejects_psk_wrapped_with_different_passphrase(self, monkeypatch):
+        priv, pub = waygate_keys.generate_keypair()
+        entry = {
+            "name": "laptop",
+            "public_key": pub,
+            "private_key_wrapped": waygate_migration.wrap_with_passphrase(priv, "pw-abcdefgh"),
+            "preshared_key_wrapped": waygate_migration.wrap_with_passphrase(
+                waygate_keys.generate_preshared_key(), "different-passphrase"
+            ),
+        }
+        create = AsyncMock()
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
+
+        result = await waygate_migration.import_bundle(
+            "test-project-123", _server(), {"version": 1, "clients": [entry]}, "pw-abcdefgh"
+        )
+
+        assert result["imported"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["reason"] == "패스프레이즈가 올바르지 않거나 번들이 손상되었습니다"
+        create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_import_preserves_minimum_tunnel_settings(self, monkeypatch):
+        priv, pub = waygate_keys.generate_keypair()
+        entry = {
+            "name": "laptop",
+            "public_key": pub,
+            "private_key_wrapped": waygate_migration.wrap_with_passphrase(priv, "pw-abcdefgh"),
+            "mtu": 576,
+            "persistent_keepalive": 0,
+        }
+        create = AsyncMock()
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
+
+        result = await waygate_migration.import_bundle(
+            "test-project-123", _server(), {"version": 1, "clients": [entry]}, "pw-abcdefgh"
+        )
+
+        assert result == {"imported": 1, "skipped": []}
+        assert create.await_args.args[3]["mtu"] == 576
+        assert create.await_args.args[3]["persistent_keepalive"] == 0
+        assert create.await_args.args[3]["preshared_key_encrypted"] is None
+
+    @pytest.mark.asyncio
+    async def test_import_rejects_private_key_public_key_mismatch(self, monkeypatch):
+        priv, _ = waygate_keys.generate_keypair()
+        _, other_pub = waygate_keys.generate_keypair()
+        entry = {
+            "name": "laptop",
+            "public_key": other_pub,
+            "private_key_wrapped": waygate_migration.wrap_with_passphrase(priv, "pw-abcdefgh"),
+        }
+        create = AsyncMock()
+        monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
+        monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
+
+        result = await waygate_migration.import_bundle(
+            "test-project-123", _server(), {"version": 1, "clients": [entry]}, "pw-abcdefgh"
+        )
+
+        assert result["imported"] == 0
+        assert result["skipped"][0]["reason"] == "클라이언트 키 무결성 검증 실패"
+        create.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unsupported_bundle_version_rejected(self):

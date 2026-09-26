@@ -2,16 +2,17 @@
 
 client name/allowed_ips/dns 에 개행·쉘 메타문자·YAML 구조 파괴 시도 문자열이 들어왔을 때
 Pydantic validator(app/models/vpn.py)가 422(ValidationError)로 거부하는지 확인한다.
-또한 cloud-init 렌더 함수(app/services/waygate_config.py:render_agent_userdata)에 안전하지
-않은 값을 억지로 통과시켰을 때도 `| shlex_quote`/`| tojson` 이 적용되어 원본 위험 문자열이
-템플릿 출력에 raw 로 노출되지 않는지 검증한다.
+또한 cloud-init 렌더 함수(render_agent_userdata)가 형식이 잘못된 값을 거부하고, 검증된
+값을 실행 스크립트 보간 없이 JSON 설정 파일로만 전달하는지 검증한다.
 
 선례: tests/test_cloudinit.py, tests/test_k3s_nodegroup_security.py
 """
 
 import base64
+import json
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from waygate.models.schemas import (
@@ -129,9 +130,6 @@ class TestClientDnsInjection:
         req = WaygateClientCreateRequest(name="valid-name", dns="dns.example.com")
         assert req.dns == "dns.example.com"
 
-    def test_valid_multi_dns_accepted(self):
-        req = WaygateClientCreateRequest(name="valid-name", dns="8.8.8.8,1.1.1.1")
-        assert req.dns == "8.8.8.8,1.1.1.1"
 
     def test_none_dns_accepted(self):
         req = WaygateClientCreateRequest(name="valid-name", dns=None)
@@ -148,11 +146,6 @@ class TestClientUpdateNameInjection:
     def test_malicious_name_rejected(self, malicious):
         with pytest.raises(ValidationError):
             WaygateClientUpdateRequest(name=malicious)
-
-    def test_none_name_accepted(self):
-        req = WaygateClientUpdateRequest(name=None, enabled=False)
-        assert req.name is None
-
 
 # ---------------------------------------------------------------------------
 # VpnServerCreateRequest.name
@@ -171,6 +164,8 @@ class TestServerNameInjection:
         assert req.name.startswith("waygate-")
 
 
+# ---------------------------------------------------------------------------
+# VpnAgentRegisterRequest.public_key — WireGuard 키 형식 화이트리스트
 # ---------------------------------------------------------------------------
 # VpnAgentRegisterRequest.public_key — WireGuard 키 형식 화이트리스트
 # ---------------------------------------------------------------------------
@@ -200,146 +195,101 @@ class TestAgentPublicKeyInjection:
 
 
 # ---------------------------------------------------------------------------
-# cloud-init 렌더 — shlex_quote/tojson 적용 확인 (템플릿 출력에 raw 위험 문자열 미노출)
+# cloud-init 렌더 — 검증된 값은 agent JSON config로만 전달
 # ---------------------------------------------------------------------------
+
+_AGENT_CONFIG_PATH = "/etc/waygate/agent.json"
+_VALID_USERDATA = {
+    "server_name": "waygate-test",
+    "listen_port": 51820,
+    "tunnel_cidr": "10.8.0.0/24",
+    "register_url": "https://backend.example.com/v1/servers/s1/agent/register",
+    "desired_state_url": "https://backend.example.com/v1/servers/s1/agent/desired-state",
+    "status_url": "https://backend.example.com/v1/servers/s1/agent/status",
+    "bootstrap_token": "safe-token-1234567890",
+    "install_packages": True,
+}
 
 
 class TestCloudInitRenderQuoting:
-    """render_agent_userdata 는 내부적으로 _validate_cloudinit_inputs 로 형식을 검증하지만,
-    심층 방어로 값이 이미 통과했다고 가정하고 템플릿 출력에서 shlex_quote/tojson 적용을 검증한다.
-    """
+    """render_agent_userdata 의 입력 검증과 설치 모드별 cloud-init 구조를 검증한다."""
 
     def _decode(self, encoded: str) -> str:
         return base64.b64decode(encoded).decode()
 
-    def test_bootstrap_token_with_shell_meta_is_quoted_by_filter(self):
-        """shlex_quote 필터 자체가 쉘 메타문자를 단일따옴표로 감싸는지 직접 검증한다.
+    def _render(self, **overrides) -> dict:
+        return yaml.safe_load(self._decode(waygate_config.render_agent_userdata(**(_VALID_USERDATA | overrides))))
 
-        _TOKEN_RE 화이트리스트는 영숫자/-/_ 만 허용해 정상 흐름에서는 위험 문자가
-        도달할 수 없지만, 필터가 실제로 적용되어 있는지(방어 계층 자체의 존재)를
-        렌더 결과에서 직접 확인한다 — Jinja 템플릿에서 필터가 실수로 제거되는
-        회귀를 방지.
-        """
-        import shlex
+    @staticmethod
+    def _assert_no_template_markers(document: dict) -> None:
+        assert all("{{" not in entry["content"] for entry in document["write_files"])
 
-        from waygate.services.config_render import _jinja
+    def test_userdata_embeds_agent_config_json(self):
+        document = self._render()
+        entry = next(item for item in document["write_files"] if item["path"] == _AGENT_CONFIG_PATH)
 
-        rendered = _jinja.get_template("waygate_agent.yaml.j2").render(
-            server_name="waygate-test",
-            listen_port=51820,
-            register_url="https://backend.example.com/register",
-            desired_state_url="https://backend.example.com/desired-state",
-            status_url="https://backend.example.com/status",
-            bootstrap_token="tok;rm -rf /",  # 검증 우회 후 필터 자체 동작 확인
-            reconcile_interval_seconds=15,
-        )
-        line = next(ln.strip() for ln in rendered.splitlines() if ln.strip().startswith("BOOTSTRAP_TOKEN="))
-        value = line.removeprefix("BOOTSTRAP_TOKEN=")
-        assert value == shlex.quote("tok;rm -rf /")
-        assert value.startswith("'") and value.endswith("'")
-        # raw 세미콜론이 따옴표 밖에서 노출되지 않아야 함
-        assert value.count("'") == 2
+        assert entry["permissions"] == "0600"
+        assert json.loads(entry["content"]) == {
+            "register_url": _VALID_USERDATA["register_url"],
+            "desired_state_url": _VALID_USERDATA["desired_state_url"],
+            "status_url": _VALID_USERDATA["status_url"],
+            "bootstrap_token": _VALID_USERDATA["bootstrap_token"],
+            "listen_port": 51820,
+            "tunnel_cidr": "10.8.0.0/24",
+            "tunnel_address": "10.8.0.1/24",
+            "agent_install_mode": "cloud-init",
+        }
+        self._assert_no_template_markers(document)
 
-    def test_register_url_with_shell_meta_is_quoted_by_filter(self):
-        import shlex
+    def test_cloud_init_mode_installs_packages_and_agent_files(self):
+        from waygate.services.config_render import AGENT_FILES, agent_asset, agent_packages
 
-        from waygate.services.config_render import _jinja
+        document = self._render()
+        written = {entry["path"]: entry for entry in document["write_files"]}
 
-        rendered = _jinja.get_template("waygate_agent.yaml.j2").render(
-            server_name="waygate-test",
-            listen_port=51820,
-            register_url="https://backend.example.com/register;rm -rf /",
-            desired_state_url="https://backend.example.com/desired-state",
-            status_url="https://backend.example.com/status",
-            bootstrap_token="safe-token-1234567890",
-            reconcile_interval_seconds=15,
-        )
-        line = next(ln.strip() for ln in rendered.splitlines() if ln.strip().startswith("REGISTER_URL="))
-        value = line.removeprefix("REGISTER_URL=")
-        assert value == shlex.quote("https://backend.example.com/register;rm -rf /")
-        assert value.startswith("'") and value.endswith("'")
+        assert document["package_update"] is True
+        assert document["packages"] == agent_packages()
+        assert set(written) == {_AGENT_CONFIG_PATH} | {target for _, target, _ in AGENT_FILES}
+        for name, target, mode in AGENT_FILES:
+            assert written[target]["permissions"] == mode
+            assert written[target]["content"] == agent_asset(name)
+        self._assert_no_template_markers(document)
 
-    def test_desired_state_and_status_url_are_json_encoded(self):
-        """Python 스크립트(vpn-reconcile.py) 내에서는 tojson 필터로 안전하게 문자열 리터럴화된다."""
-        encoded = waygate_config.render_agent_userdata(
-            server_name="waygate-test",
-            listen_port=51820,
-            register_url="https://backend.example.com/v1/servers/s1/agent/register",
-            desired_state_url="https://backend.example.com/v1/servers/s1/agent/desired-state",
-            status_url="https://backend.example.com/v1/servers/s1/agent/status",
-            bootstrap_token="safe-token-1234567890",
-        )
-        yaml_str = self._decode(encoded)
-        assert 'DESIRED_STATE_URL = "https://backend.example.com' in yaml_str
-        assert 'STATUS_URL = "https://backend.example.com' in yaml_str
-        assert 'BOOTSTRAP_TOKEN = "safe-token-1234567890"' in yaml_str
+    def test_prebuilt_mode_writes_only_agent_config(self):
+        cloud_init = self._render()
+        prebuilt = self._render(install_packages=False)
 
-    def test_listen_port_is_quoted_string(self):
-        encoded = waygate_config.render_agent_userdata(
-            server_name="waygate-test",
-            listen_port=51820,
-            register_url="https://backend.example.com/v1/servers/s1/agent/register",
-            desired_state_url="https://backend.example.com/v1/servers/s1/agent/desired-state",
-            status_url="https://backend.example.com/v1/servers/s1/agent/status",
-            bootstrap_token="safe-token-1234567890",
-        )
-        yaml_str = self._decode(encoded)
-        assert "ListenPort = 51820" in yaml_str
+        assert "packages" not in prebuilt
+        assert "package_update" not in prebuilt
+        assert [entry["path"] for entry in prebuilt["write_files"]] == [_AGENT_CONFIG_PATH]
+        assert prebuilt["runcmd"] == cloud_init["runcmd"]
+        assert json.loads(prebuilt["write_files"][0]["content"])["agent_install_mode"] == "prebuilt"
+        self._assert_no_template_markers(prebuilt)
+
+    def test_rejects_bad_tunnel_cidr(self):
+        with pytest.raises(ValueError):
+            waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"tunnel_cidr": "10.8.0.0/99"}))
 
     def test_validate_cloudinit_inputs_rejects_bad_server_name(self):
         with pytest.raises(ValueError):
-            waygate_config.render_agent_userdata(
-                server_name="evil\nruncmd: rm -rf /",
-                listen_port=51820,
-                register_url="https://backend.example.com/register",
-                desired_state_url="https://backend.example.com/desired-state",
-                status_url="https://backend.example.com/status",
-                bootstrap_token="safe-token-1234567890",
-            )
+            waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"server_name": "evil\nruncmd: rm -rf /"}))
 
     def test_validate_cloudinit_inputs_rejects_bad_url(self):
         with pytest.raises(ValueError):
             waygate_config.render_agent_userdata(
-                server_name="waygate-test",
-                listen_port=51820,
-                register_url="not-a-valid-url\nruncmd: evil",
-                desired_state_url="https://backend.example.com/desired-state",
-                status_url="https://backend.example.com/status",
-                bootstrap_token="safe-token-1234567890",
+                **(_VALID_USERDATA | {"register_url": "not-a-valid-url\nruncmd: evil"})
             )
 
     def test_validate_cloudinit_inputs_rejects_bad_token(self):
         with pytest.raises(ValueError):
-            waygate_config.render_agent_userdata(
-                server_name="waygate-test",
-                listen_port=51820,
-                register_url="https://backend.example.com/register",
-                desired_state_url="https://backend.example.com/desired-state",
-                status_url="https://backend.example.com/status",
-                bootstrap_token="tok;rm -rf /",
-            )
+            waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"bootstrap_token": "tok;rm -rf /"}))
 
     def test_validate_cloudinit_inputs_rejects_bad_listen_port(self):
         with pytest.raises(ValueError):
-            waygate_config.render_agent_userdata(
-                server_name="waygate-test",
-                listen_port=70000,
-                register_url="https://backend.example.com/register",
-                desired_state_url="https://backend.example.com/desired-state",
-                status_url="https://backend.example.com/status",
-                bootstrap_token="safe-token-1234567890",
-            )
+            waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"listen_port": 70000}))
 
     def test_valid_inputs_render_successfully(self):
         """정상 입력은 예외 없이 렌더되고 base64 로 인코딩된다."""
-        encoded = waygate_config.render_agent_userdata(
-            server_name="waygate-prod-01",
-            listen_port=51820,
-            register_url="https://backend.example.com/v1/servers/s1/agent/register",
-            desired_state_url="https://backend.example.com/v1/servers/s1/agent/desired-state",
-            status_url="https://backend.example.com/v1/servers/s1/agent/status",
-            bootstrap_token="safe-token-1234567890",
-        )
-        yaml_str = self._decode(encoded)
+        yaml_str = self._decode(waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"server_name": "waygate-prod-01"})))
         assert "waygate-prod-01" in yaml_str
         assert "wg-quick@wg0" in yaml_str

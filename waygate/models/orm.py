@@ -44,11 +44,15 @@ class WaygateServer(Base):
     endpoint_ip: Mapped[str | None] = mapped_column(VARCHAR(45))  # FIP 또는 provider fixed IP
     key_name: Mapped[str | None] = mapped_column(VARCHAR(255))
     resource_policy_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    agent_install_mode: Mapped[str] = mapped_column(VARCHAR(16), nullable=False, default="cloud-init")
 
     # 에이전트 제어채널 자격증명 — AES-256-GCM 암호화 저장(도메인 wg_agent_token).
     # Redis(휘발성)가 아니라 여기에 durable 하게 보관해, Redis eviction/재시작이나 이전
     # 7일 TTL 만료 후에도 에이전트 register/desired-state/status 채널이 유지된다.
     agent_token_encrypted: Mapped[str | None] = mapped_column(TEXT)
+    agent_token_next_encrypted: Mapped[str | None] = mapped_column(TEXT)
+    agent_token_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agent_token_rotation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # WireGuard 설정
     server_public_key: Mapped[str | None] = mapped_column(VARCHAR(64))  # 에이전트 register가 채움
@@ -111,6 +115,8 @@ class WaygateClient(Base):
     tunnel_ip: Mapped[str | None] = mapped_column(VARCHAR(45))
     allowed_ips: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 클라이언트→서버 방향 route 대상
     dns: Mapped[str | None] = mapped_column(VARCHAR(255))
+    mtu: Mapped[int | None] = mapped_column(INT)
+    persistent_keepalive: Mapped[int] = mapped_column(INT, nullable=False, default=25)
 
     # 타임스탬프
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

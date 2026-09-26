@@ -12,7 +12,7 @@ def _settings(callback_base_url: str = "https://backend.example.com") -> SimpleN
     return SimpleNamespace(waygate_callback_base_url=callback_base_url)
 
 
-def _record(*, floating_network_id: str | None = None) -> dict:
+def _record(*, floating_network_id: str | None = None, agent_install_mode: str = "cloud-init") -> dict:
     snapshot = {
         "waygate.provider_network": {"id": "net-provider-1", "name": "Provider"},
         "waygate.image": {"id": "img-ubuntu-1", "name": "Ubuntu"},
@@ -24,6 +24,8 @@ def _record(*, floating_network_id: str | None = None) -> dict:
         "id": "server-1",
         "name": "waygate-gw-1",
         "listen_port": 51820,
+        "tunnel_cidr": "10.8.0.0/24",
+        "agent_install_mode": agent_install_mode,
         "provider_network_id": "net-provider-1",
         "image_id": "img-ubuntu-1",
         "flavor_id": "flavor-abc",
@@ -33,7 +35,8 @@ def _record(*, floating_network_id: str | None = None) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_provision_uses_persisted_snapshot_without_fip():
+@pytest.mark.parametrize("mode", ["cloud-init", "prebuilt"])
+async def test_provision_uses_persisted_snapshot_without_fip(mode):
     conn = MagicMock()
     conn.close = MagicMock()
     server = MagicMock(id="vm-123")
@@ -43,7 +46,7 @@ async def test_provision_uses_persisted_snapshot_without_fip():
     with (
         patch("waygate.services.provisioner.get_settings", return_value=_settings()),
         patch("waygate.auth.get_admin_connection_for_project", return_value=conn),
-        patch("waygate.services.store.get_server_by_id", new=AsyncMock(return_value=_record())),
+        patch("waygate.services.store.get_server_by_id", new=AsyncMock(return_value=_record(agent_install_mode=mode))),
         patch("waygate.services.provisioner._ensure_wireguard_sg", return_value="sg-1"),
         patch("waygate.services.openstack_ops.create_port", return_value={"id": "port-1"}) as create_port,
         patch("waygate.services.agent_auth.issue_report_token", new=AsyncMock(return_value="token")),
@@ -61,6 +64,8 @@ async def test_provision_uses_persisted_snapshot_without_fip():
     assert "key_name" not in kwargs
     assert update_status.call_args_list[-1].kwargs["endpoint_ip"] == "10.0.0.5"
     render_kwargs = render_userdata.call_args.kwargs
+    assert render_kwargs["install_packages"] is (mode == "cloud-init")
+    assert render_kwargs["tunnel_cidr"] == "10.8.0.0/24"
     assert render_kwargs["register_url"] == "https://backend.example.com/v1/servers/server-1/agent/register"
     assert render_kwargs["desired_state_url"] == "https://backend.example.com/v1/servers/server-1/agent/desired-state"
     assert render_kwargs["status_url"] == "https://backend.example.com/v1/servers/server-1/agent/status"

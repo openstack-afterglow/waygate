@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 
-_logger = logging.getLogger(__name__)
 AFTERGLOW_MANAGED_TAG = "[afterglow-managed]"
 
 
@@ -64,25 +62,13 @@ def delete_port(conn, port_id: str) -> None:
 
 
 def cleanup_instance_fips(conn, instance_id: str) -> None:
-    try:
-        ports = list(conn.network.ports(device_id=instance_id))
-    except Exception:
-        _logger.warning("Failed to list instance ports instance=%s", instance_id, exc_info=True)
-        return
-    port_ids = {port.id for port in ports}
+    port_ids = {port.id for port in conn.network.ports(device_id=instance_id)}
     if not port_ids:
         return
-    try:
-        fips = [floating_ip for floating_ip in conn.network.ips() if floating_ip.port_id in port_ids]
-    except Exception:
-        _logger.warning("Failed to list instance floating IPs instance=%s", instance_id, exc_info=True)
-        return
-    for floating_ip in fips:
-        try:
-            conn.network.update_ip(floating_ip.id, port_id=None)
-            conn.network.delete_ip(floating_ip.id, ignore_missing=True)
-        except Exception:
-            _logger.warning("Failed to clean floating IP %s", floating_ip.id, exc_info=True)
+    floating_ips = [floating_ip for floating_ip in conn.network.ips() if floating_ip.port_id in port_ids]
+    for floating_ip in floating_ips:
+        # Keep the association discoverable if deletion fails and the worker retries.
+        conn.network.delete_ip(floating_ip.id, ignore_missing=True)
 
 
 def _security_group_to_dict(group) -> dict:

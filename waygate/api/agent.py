@@ -94,6 +94,8 @@ async def get_desired_state(request: Request, server_id: str):
                 preshared_key = k3s_crypto.decrypt_wg_client_key(c["preshared_key_encrypted"])
             except Exception:
                 _logger.warning("waygate agent desired-state: preshared_key 복호화 실패 (client=%s)", c["id"])
+                # A damaged encrypted PSK must never turn an authenticated peer into a PSK-less one.
+                continue
         client_payload.append(
             {
                 "public_key": c["public_key"],
@@ -110,6 +112,7 @@ async def get_desired_state(request: Request, server_id: str):
         tunnel_cidr=server["tunnel_cidr"],
         clients=client_payload,
         nat_networks=nat_networks,
+        next_token=await waygate_agent_auth.get_pending_next_token(server_id),
     )
 
 

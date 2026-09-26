@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from waygate.services import keystone, neutron, nova, waygate_db
+from waygate.services.store import WaygateServerInactiveError
 
 _logger = logging.getLogger(__name__)
 
@@ -76,17 +77,20 @@ async def attach_network(project_id: str, server: dict, network_id: str, subnet_
 
         resolved_subnet_id, cidr = await asyncio.to_thread(_resolve_cidr, conn, network_id, subnet_id)
 
-        att = await waygate_db.create_attachment_record(
-            server_id,
-            project_id,
-            {
-                "network_id": network_id,
-                "subnet_id": resolved_subnet_id,
-                "cidr": cidr,
-                "nat_mode": nat_mode,
-                "status": "CREATING",
-            },
-        )
+        try:
+            att = await waygate_db.create_attachment_record(
+                server_id,
+                project_id,
+                {
+                    "network_id": network_id,
+                    "subnet_id": resolved_subnet_id,
+                    "cidr": cidr,
+                    "nat_mode": nat_mode,
+                    "status": "CREATING",
+                },
+            )
+        except WaygateServerInactiveError as exc:
+            raise WaygateNetworkError(409, "Waygate 서버가 ACTIVE 상태가 아닙니다") from exc
         port_id: str | None = None
         try:
             port = await asyncio.to_thread(
@@ -145,6 +149,8 @@ async def detach_network(project_id: str, server: dict, attachment_id: int) -> N
     att = await waygate_db.get_attachment(server_id, project_id, attachment_id)
     if not att:
         raise WaygateNetworkError(404, "네트워크 연결을 찾을 수 없습니다")
+    if att.get("status") == "CREATING":
+        raise WaygateNetworkError(409, "네트워크 연결 생성이 아직 진행 중입니다")
 
     try:
         conn = await asyncio.to_thread(keystone.get_admin_connection_for_project, project_id)

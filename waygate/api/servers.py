@@ -28,6 +28,7 @@ async def _merge_status(server: dict) -> WaygateServerInfo:
     if status_result:
         info.last_status_reported_at = status_result.get("_stored_at")
         info.peer_count = len(status_result.get("peers", []))
+        info.agent_source = status_result.get("agent_source")
     return info
 
 
@@ -73,6 +74,7 @@ async def create_waygate_server(
             "provider_network_id": snapshot["waygate.provider_network"]["id"],
             "floating_network_id": (snapshot.get("waygate.floating_network") or {}).get("id"),
             "resource_policy_snapshot": snapshot,
+            "agent_install_mode": settings.waygate_agent_install_mode,
             "created_by_user_id": token_info.get("user_id"),
             "created_by_username": token_info.get("username"),
         },
@@ -101,6 +103,24 @@ async def get_waygate_server(server_id: str, token_info: dict = Depends(require_
     if not server:
         # 정보 노출 방지 — 존재하지 않음/타 프로젝트 소유 모두 동일 404
         raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
+    return await _merge_status(server)
+
+
+@router.post("/{server_id}/agent-token/rotate", status_code=202, response_model=WaygateServerInfo)
+async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(require_token)):
+    """Stage an agent credential handoff without exposing the token to the tenant."""
+    _require_db()
+    project_id = token_info["project_id"]
+    server = await waygate_db.get_server(project_id, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
+    if server["status"] != "ACTIVE":
+        raise HTTPException(status_code=409, detail="Waygate 서버가 ACTIVE 상태가 아닙니다")
+    try:
+        await waygate_agent_auth.request_token_rotation(server_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=f"에이전트 토큰을 갱신할 수 없습니다: {exc}") from exc
+    server = await waygate_db.get_server(project_id, server_id)
     return await _merge_status(server)
 
 

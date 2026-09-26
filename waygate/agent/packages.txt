@@ -1,0 +1,6 @@
+wireguard
+curl
+python3
+iptables
+iproute2
+isc-dhcp-client

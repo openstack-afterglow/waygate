@@ -27,6 +27,14 @@ def _response(status_code=200, *, payload=None, text=""):
         ("get_server", ("server-1",), {}, "GET", "/v1/servers/server-1", None),
         ("create_server", (), {"name": "gateway-1"}, "POST", "/v1/servers", {"name": "gateway-1"}),
         ("delete_server", ("server-1",), {}, "DELETE", "/v1/servers/server-1", None),
+        (
+            "rotate_agent_token",
+            ("server/1",),
+            {},
+            "POST",
+            "/v1/servers/server%2F1/agent-token/rotate",
+            None,
+        ),
         ("clients", ("server-1",), {}, "GET", "/v1/servers/server-1/clients", None),
         (
             "create_client",
@@ -115,6 +123,8 @@ def _response(status_code=200, *, payload=None, text=""):
 def test_json_methods_issue_expected_request(method_name, args, kwargs, http_method, path, body):
     proxy = Proxy(session=MagicMock(), service_type="waygate")
     status = 204 if http_method == "DELETE" else 200
+    if method_name == "rotate_agent_token":
+        status = 202
     response = _response(status, payload={"ok": True}) if status != 204 else _response(204)
     proxy.request = MagicMock(return_value=response)
 

@@ -270,9 +270,9 @@ async def process_one_job() -> bool:
             if attempt > 1:
                 await waygate_db.update_server_status(server_id, "DELETING", "삭제 재시도 중")
             await delete_waygate_server(project_id, server_id, user_id or "")
-            server = await waygate_db.get_server(project_id, server_id)
-            if server is not None:
-                raise RuntimeError(server.get("status_reason") or f"unexpected server status: {server['status']}")
+            state = await waygate_db.get_server_deletion_state(project_id, server_id)
+            if state != ("DELETED", True):
+                raise RuntimeError(f"Waygate server deletion did not reach terminal state: {state}")
         else:
             raise RuntimeError(f"unsupported Waygate job kind: {kind}")
         await _complete(job_id, attempt=attempt)

@@ -62,6 +62,7 @@ def _load_toml() -> dict:
         "database_pool_timeout": database.get("pool_timeout", 10),
         "redis_url": cache.get("redis_url", "redis://localhost:6379/6"),
         "waygate_callback_base_url": waygate.get("callback_base_url", ""),
+        "waygate_agent_install_mode": waygate.get("agent_install_mode", "cloud-init"),
         "waygate_key_name": waygate.get("key_name", ""),
         "waygate_default_tunnel_cidr": waygate.get("default_tunnel_cidr", "10.8.0.0/24"),
         "waygate_default_listen_port": waygate.get("default_listen_port", 51820),
@@ -93,11 +94,20 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/6"
 
     waygate_callback_base_url: str = ""
+    waygate_agent_install_mode: str = "cloud-init"
     waygate_key_name: str = ""
     waygate_default_tunnel_cidr: str = "10.8.0.0/24"
     waygate_default_listen_port: int = 51820
     waygate_encryption_key: str = ""
     trusted_proxies: str = "127.0.0.1/32,::1/128"
+
+    @field_validator("waygate_agent_install_mode")
+    @classmethod
+    def validate_agent_install_mode(cls, value: str) -> str:
+        value = value.strip()
+        if value not in {"cloud-init", "prebuilt"}:
+            raise ValueError("waygate.agent_install_mode must be 'cloud-init' or 'prebuilt'")
+        return value
 
     @field_validator("waygate_encryption_key")
     @classmethod
