@@ -6,3 +6,12 @@ __pycache__/
 .venv/
 dist/
 *.egg-info/
+
+# Gateway image builds (dist/ above holds release artifacts).
+packer_cache/
+deploy/image/packer/output*/
+deploy/image/packer/openstack/output*/
+*.qcow2
+
+# Local OpenStack credentials.
+/clouds.yaml

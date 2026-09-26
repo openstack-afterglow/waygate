@@ -7,7 +7,7 @@ DB가 설정되지 않은 경우(is_db_available()==False) 503을 반환하도�
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from waygate.db import get_session_factory, is_db_available
@@ -51,6 +51,9 @@ def _server_to_dict(s: WaygateServer) -> dict:
         "endpoint_ip": getattr(s, "endpoint_ip", None),
         "key_name": getattr(s, "key_name", None),
         "resource_policy_snapshot": getattr(s, "resource_policy_snapshot", None),
+        "agent_install_mode": s.agent_install_mode,
+        "agent_token_issued_at": s.agent_token_issued_at.isoformat() if s.agent_token_issued_at else None,
+        "agent_token_rotation_pending": s.agent_token_next_encrypted is not None,
         "server_public_key": getattr(s, "server_public_key", None),
         "listen_port": s.listen_port,
         "tunnel_cidr": s.tunnel_cidr,
@@ -103,6 +106,7 @@ def add_server_record(session, project_id: str, server_id: str, data: dict) -> W
         provider_network_id=data.get("provider_network_id") or None,
         floating_network_id=data.get("floating_network_id") or None,
         resource_policy_snapshot=data.get("resource_policy_snapshot") or None,
+        agent_install_mode=data.get("agent_install_mode") or "cloud-init",
         listen_port=int(data.get("listen_port") or 51820),
         tunnel_cidr=data.get("tunnel_cidr") or "10.8.0.0/24",
         dns=data.get("dns") or None,
@@ -222,44 +226,96 @@ async def update_server_status(
 
 
 async def set_agent_token(server_id: str, token_encrypted: str | None) -> None:
-    """에이전트 제어채널 토큰(암호화)을 waygate_servers 행에 durable 하게 저장.
-
-    DB 미가용 시 no-op — 이 경우 호출부(waygate_agent_auth)는 Redis 캐시만으로 degrade 동작한다.
-    project_id 필터 없음(백그라운드 프로비저닝/에이전트 인증 경로 전용, server_id 로 직접 접근).
-    """
-    if not is_db_available():
-        return
+    """Commit issuance/revocation; never report an unavailable DB or row as success."""
     factory = get_session_factory()
-    if factory is None:
-        return
+    if not is_db_available() or factory is None:
+        raise RuntimeError("database unavailable for agent credentials")
+    now = datetime.now(UTC)
     async with factory() as session:
-        stmt = select(WaygateServer).where(WaygateServer.id == server_id)
-        result = await session.execute(stmt)
-        server = result.scalar_one_or_none()
-        if server is None:
-            _logger.warning("set_agent_token: server %s not found", server_id)
-            return
-        server.agent_token_encrypted = token_encrypted
-        server.updated_at = datetime.now(UTC)
+        result = await session.execute(
+            update(WaygateServer)
+            .where(WaygateServer.id == server_id, WaygateServer.deleted_at.is_(None))
+            .values(
+                agent_token_encrypted=token_encrypted,
+                agent_token_next_encrypted=None,
+                agent_token_rotation_requested_at=None,
+                agent_token_issued_at=now if token_encrypted else None,
+                updated_at=now,
+            )
+        )
+        if result.rowcount != 1:
+            raise RuntimeError("server unavailable for agent credentials")
         await session.commit()
 
 
-async def get_agent_token_encrypted(server_id: str) -> str | None:
-    """waygate_servers 행에서 암호화된 에이전트 토큰을 조회. 삭제된 서버는 제외(제어채널 무효화).
+async def set_agent_next_token(server_id: str, next_token_encrypted: str) -> bool:
+    """Stage only when active and not already pending; the first concurrent request wins."""
+    factory = get_session_factory()
+    if not is_db_available() or factory is None:
+        raise RuntimeError("database unavailable for agent credentials")
+    now = datetime.now(UTC)
+    async with factory() as session:
+        result = await session.execute(
+            update(WaygateServer)
+            .where(
+                WaygateServer.id == server_id,
+                WaygateServer.deleted_at.is_(None),
+                WaygateServer.agent_token_encrypted.is_not(None),
+                WaygateServer.agent_token_next_encrypted.is_(None),
+            )
+            .values(
+                agent_token_next_encrypted=next_token_encrypted,
+                agent_token_rotation_requested_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+        return result.rowcount == 1
 
-    DB 미가용 시 None — 호출부는 Redis 캐시 fallback 으로 동작한다.
-    """
+
+async def promote_agent_token(server_id: str, expected_next_encrypted: str) -> bool:
+    """Compare-and-swap the authenticated pending ciphertext, never a stale bearer."""
+    if not expected_next_encrypted:
+        return False
+    factory = get_session_factory()
+    if not is_db_available() or factory is None:
+        raise RuntimeError("database unavailable for agent credentials")
+    now = datetime.now(UTC)
+    async with factory() as session:
+        result = await session.execute(
+            update(WaygateServer)
+            .where(
+                WaygateServer.id == server_id,
+                WaygateServer.deleted_at.is_(None),
+                WaygateServer.agent_token_encrypted.is_not(None),
+                WaygateServer.agent_token_next_encrypted == expected_next_encrypted,
+            )
+            .values(
+                agent_token_encrypted=expected_next_encrypted,
+                agent_token_next_encrypted=None,
+                agent_token_rotation_requested_at=None,
+                agent_token_issued_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def get_agent_tokens_encrypted(server_id: str) -> tuple[str | None, str | None]:
+    """Return current/pending ciphertext; exclude soft-deleted servers."""
     if not is_db_available():
-        return None
+        return None, None
     factory = get_session_factory()
     if factory is None:
-        return None
+        return None, None
     async with factory() as session:
-        stmt = select(WaygateServer.agent_token_encrypted).where(
+        stmt = select(WaygateServer.agent_token_encrypted, WaygateServer.agent_token_next_encrypted).where(
             WaygateServer.id == server_id, WaygateServer.deleted_at.is_(None)
         )
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        row = result.one_or_none()
+        return (row[0], row[1]) if row is not None else (None, None)
 
 
 async def soft_delete_server(project_id: str, server_id: str, user_id: str, reason: str = "") -> bool:

@@ -4,6 +4,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from waygate import config
 
@@ -30,6 +31,21 @@ def test_afterglow_openstack_section_is_mapped(monkeypatch):
 
     assert settings["os_auth_url"] == "https://keystone.example.test/v3"
     assert settings["os_region_name"] == "RegionTwo"
+
+
+def test_agent_install_mode_is_mapped_from_toml(monkeypatch):
+    monkeypatch.setattr(config, "load_raw_toml", lambda: {"waygate": {"agent_install_mode": "prebuilt"}})
+
+    with patch.dict(os.environ, {}, clear=True):
+        assert config.get_settings().waygate_agent_install_mode == "prebuilt"
+
+
+def test_agent_install_mode_defaults_to_cloud_init_and_rejects_unknown_value():
+    with patch.dict(os.environ, {}, clear=True):
+        assert config.Settings().waygate_agent_install_mode == "cloud-init"
+        assert config.Settings(waygate_agent_install_mode=" prebuilt ").waygate_agent_install_mode == "prebuilt"
+        with pytest.raises(ValidationError, match="agent_install_mode"):
+            config.Settings(waygate_agent_install_mode="iso")
 
 
 def test_public_callback_base_url_is_required():

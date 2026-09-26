@@ -110,6 +110,7 @@ async def get_desired_state(request: Request, server_id: str):
         tunnel_cidr=server["tunnel_cidr"],
         clients=client_payload,
         nat_networks=nat_networks,
+        next_token=await waygate_agent_auth.get_pending_next_token(server_id),
     )
 
 

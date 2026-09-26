@@ -47,6 +47,7 @@ waygate_public_endpoint_url: "{{ waygate_external_url }}"
 waygate_internal_endpoint_url: "{{ internal_protocol | default('http') }}://{{ kolla_internal_fqdn | default(kolla_internal_vip_address) }}:{{ waygate_api_port }}"
 waygate_admin_endpoint_url: "{{ waygate_internal_endpoint_url }}"
 waygate_default_tunnel_cidr: "10.8.0.0/24"
+waygate_agent_install_mode: "cloud-init"
 
 # Optional Kolla external-VIP route. Keep waygate-api internal so Afterglow
 # and Keystone's internal/admin endpoints keep their existing VIP listener.

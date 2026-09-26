@@ -1,3 +1,15 @@
+# Post-0.1.4 gateway feature deployment
+
+This source snapshot adds gateway image modes and agent-token rotation. Deploy CI-published images by their immutable digests; the existing `v0.1.4` tag and its artifacts are not replaced. Package metadata remains 0.1.4, so record the source commit and image digests rather than relying on the version string alone.
+
+- Gateway installation supports `cloud-init` (default) and `prebuilt`, snapshotted per server. Prebuilt mode requires a public/community Glance image with `waygate_agent=prebuilt`. Both modes use the same agent and persist its configuration separately from its executable.
+- Tenant owners can request `POST /v1/servers/{server_id}/agent-token/rotate`. The agent fsyncs both the replacement file and its directory before using the pending bearer, and checks directory durability on later loads. First successful pending-bearer authentication conditionally promotes the persisted ciphertext and invalidates the old bearer. Repeated/concurrent requests retain an existing pending rotation. Issuance, rotation and revocation require durable DB commits; authentication ignores obsolete Redis credential entries and fails closed when the DB is unavailable. Redis remains a status cache only.
+- Gateway WireGuard configuration now assigns the first usable tunnel address. Ubuntu 24.04 amd64 images can be built through local QEMU or native OpenStack; provisioning removes inherited SSH authorized keys before snapshotting.
+- Apply additive migration `002_agent_install_mode_and_token_rotation.sql` before starting the new API and worker. Preserve the database and the previous image/configuration references for rollback.
+- Set Kolla `waygate_callback_base_url` explicitly to the VM-reachable public API URL. A separately configured `waygate_public_endpoint_url` does not override the callback default. The service account needs project membership with resource-creation permissions in each project it provisions.
+
+Verification before publication: amd64/arm64 API and worker image builds and runtime feature smoke passed; QEMU and native OpenStack image build/fresh-boot evidence is recorded in `ARCHITECTURE.md`. Production rollout and full Waygate lifecycle evidence are recorded separately after execution, not inferred from image builds.
+
 # Waygate 0.1.4 release notes
 
 Changes since `v0.1.2` (`0257ac17bb2baafc684aa065ee879fd50c324ef1`). This is a release candidate until the reviewed commit is tagged, the gates pass, and artifacts are published.

@@ -29,6 +29,15 @@
   tags: precheck
   when: enable_waygate | bool
 
+- name: Precheck | Validate Waygate agent install mode
+  ansible.builtin.assert:
+    that:
+      - waygate_agent_install_mode in ['cloud-init', 'prebuilt']
+    fail_msg: "waygate_agent_install_mode must be cloud-init or prebuilt"
+  run_once: true
+  tags: precheck
+  when: enable_waygate | bool
+
 - name: Precheck | Validate Waygate public route hostname
   ansible.builtin.assert:
     that:

@@ -1,18 +1,24 @@
-"""VPN 에이전트 대면 API(register/desired-state/status) 베어러 토큰 인증 테스트.
+"""Agent HTTP authentication and durable token transitions against isolated SQLite.
 
-에이전트 엔드포인트는 사용자 JWT가 아닌 베어러 토큰(waygate_agent_auth)으로 인증하며
-fail-closed(무효/불일치 시 401/403)이다. `_verify_and_bind`가 DB 조회 이전에 실행되므로
-인증 실패 케이스는 DB mock 없이도 검증 가능하다. 토큰 자체는 fakeredis(conftest 전역
-fixture)에 실제로 저장/조회되므로 real end-to-end 토큰 발급 흐름으로 테스트한다.
+The session adapter preserves real SQLAlchemy queries/transactions without a live
+database or an additional async SQLite driver. Redis is used only for status and
+for injecting obsolete credential entries that must never authorize requests.
 """
 
+import asyncio
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from waygate.main import app
-from waygate.services import waygate_agent_auth, waygate_config
+from waygate.models.orm import Base, WaygateServer
+from waygate.services import waygate_agent_auth, waygate_config, waygate_db
 
 
 def _server_record(**overrides) -> dict:
@@ -77,7 +83,7 @@ class TestAgentAuthInvalidToken:
     @pytest.mark.asyncio
     async def test_revoked_token_returns_401(self, api_client):
         """토큰 발급 후 폐기(revoke)되면 이후 요청은 401이어야 한다."""
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         await waygate_agent_auth.revoke_report_token_by_server("server-1")
         resp = await api_client.get(
             "/v1/servers/server-1/agent/desired-state",
@@ -96,7 +102,7 @@ class TestAgentAuthServerIdMismatch:
     @pytest.mark.asyncio
     async def test_token_bound_to_different_server_returns_401(self, api_client):
         """server-A 용 토큰으로 server-B 경로를 호출하면 401(server-B 에는 무효)."""
-        token = await waygate_agent_auth.issue_report_token("server-A", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-A")
         resp = await api_client.get(
             "/v1/servers/server-B/agent/desired-state",
             headers={"Authorization": f"Bearer {token}"},
@@ -105,7 +111,7 @@ class TestAgentAuthServerIdMismatch:
 
     @pytest.mark.asyncio
     async def test_register_with_mismatched_server_id_returns_401(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-A", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-A")
         resp = await api_client.post(
             "/v1/servers/server-B/agent/register",
             json={"public_key": "A" * 43 + "="},
@@ -115,7 +121,7 @@ class TestAgentAuthServerIdMismatch:
 
     @pytest.mark.asyncio
     async def test_status_with_mismatched_server_id_returns_401(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-A", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-A")
         resp = await api_client.post(
             "/v1/servers/server-B/agent/status",
             json={"peers": []},
@@ -132,7 +138,7 @@ class TestAgentAuthServerIdMismatch:
 class TestAgentRegisterHappyPath:
     @pytest.mark.asyncio
     async def test_valid_token_register_updates_public_key_and_status(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(return_value=_server_record(status="CREATING"))
             mock_db.update_server_status = AsyncMock()
@@ -150,7 +156,7 @@ class TestAgentRegisterHappyPath:
 
     @pytest.mark.asyncio
     async def test_register_404_when_server_not_found(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(return_value=None)
             resp = await api_client.post(
@@ -162,7 +168,7 @@ class TestAgentRegisterHappyPath:
 
     @pytest.mark.asyncio
     async def test_register_rejects_invalid_public_key_format(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         resp = await api_client.post(
             "/v1/servers/server-1/agent/register",
             json={"public_key": "not-a-valid-wg-key"},
@@ -172,7 +178,7 @@ class TestAgentRegisterHappyPath:
 
     @pytest.mark.asyncio
     async def test_register_with_matching_listen_port_confirm_succeeds(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(return_value=_server_record(status="CREATING", listen_port=51820))
             mock_db.update_server_status = AsyncMock()
@@ -186,7 +192,7 @@ class TestAgentRegisterHappyPath:
 
     @pytest.mark.asyncio
     async def test_register_with_mismatched_listen_port_confirm_fails_closed(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(return_value=_server_record(status="CREATING", listen_port=51820))
             mock_db.update_server_status = AsyncMock()
@@ -202,7 +208,7 @@ class TestAgentRegisterHappyPath:
 class TestAgentDesiredStateHappyPath:
     @pytest.mark.asyncio
     async def test_valid_token_returns_desired_state(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(
                 return_value=_server_record(status="ACTIVE", server_public_key="A" * 43 + "=")
@@ -222,7 +228,7 @@ class TestAgentDesiredStateHappyPath:
 
     @pytest.mark.asyncio
     async def test_desired_state_404_when_server_not_found(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(return_value=None)
             resp = await api_client.get(
@@ -234,7 +240,7 @@ class TestAgentDesiredStateHappyPath:
     @pytest.mark.asyncio
     async def test_desired_state_excludes_disabled_clients(self, api_client):
         """enabled=False 클라이언트는 peers 목록에서 제외되어야 한다 (soft-disable)."""
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         clients = [
             {
                 "id": "c1",
@@ -271,10 +277,11 @@ class TestAgentDesiredStateHappyPath:
 class TestAgentStatusHappyPath:
     @pytest.mark.asyncio
     async def test_valid_token_stores_status_report(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         resp = await api_client.post(
             "/v1/servers/server-1/agent/status",
             json={
+                "agent_source": "prebuilt",
                 "peers": [
                     {
                         "public_key": "A" * 43 + "=",
@@ -282,7 +289,7 @@ class TestAgentStatusHappyPath:
                         "rx_bytes": 100,
                         "tx_bytes": 200,
                     }
-                ]
+                ],
             },
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -290,10 +297,11 @@ class TestAgentStatusHappyPath:
         stored = await waygate_agent_auth.get_status_result("server-1")
         assert stored is not None
         assert stored["peers"][0]["rx_bytes"] == 100
+        assert stored["agent_source"] == "prebuilt"
 
     @pytest.mark.asyncio
     async def test_status_report_rejects_invalid_public_key(self, api_client):
-        token = await waygate_agent_auth.issue_report_token("server-1", "test-project-123")
+        token = await waygate_agent_auth.issue_report_token("server-1")
         resp = await api_client.post(
             "/v1/servers/server-1/agent/status",
             json={"peers": [{"public_key": "not-valid"}]},
@@ -303,57 +311,168 @@ class TestAgentStatusHappyPath:
 
 
 # ---------------------------------------------------------------------------
-# 토큰 durability — Redis 캐시 유실(재시작/eviction/TTL 만료) 후에도 DB 원천에서 복원.
-# 과거 결함: 토큰이 Redis 에만 7일 TTL 로 저장돼, 만료/eviction 시 제어채널이 영구 소실됐다.
+# Durable token transitions, cache isolation, and delayed authentication races.
 # ---------------------------------------------------------------------------
 
 
-class TestAgentTokenDurability:
-    @pytest.mark.asyncio
-    async def test_verify_falls_back_to_db_when_cache_evicted(self):
-        """캐시가 비어도 DB(원천)에 저장된 토큰으로 검증에 성공해야 한다."""
-        from waygate.services import k3s_crypto
 
-        token = await waygate_agent_auth.issue_report_token("srv-dur", "proj-dur")
-        enc = k3s_crypto.encrypt_wg_agent_token(token)
 
-        # Redis 캐시 강제 무효화(eviction/재시작/TTL 만료 시뮬레이션)
-        r = await waygate_agent_auth._redis()
-        await r.delete(f"{waygate_agent_auth._SRVTOKEN_CACHE_PREFIX}srv-dur")
+@pytest.fixture(autouse=True)
+def agent_token_store(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            WaygateServer(id="server-1", project_id="test-project-123", name="gateway"),
+            WaygateServer(id="server-A", project_id="test-project-123", name="other-gateway"),
+            WaygateServer(id="srv-rotation", project_id="proj-rotation", name="rotation-gateway"),
+        ])
+        session.commit()
 
-        # DB 원천이 토큰을 보유하도록 mock (실제 배포에선 set_agent_token 이 이미 저장)
-        with (
-            patch("waygate.services.store.get_agent_token_encrypted", AsyncMock(return_value=enc)),
-            patch("waygate.services.store.get_server_by_id", AsyncMock(return_value={"project_id": "proj-dur"})),
-        ):
-            result = await waygate_agent_auth.verify_report_token("srv-dur", token)
-        assert result is not None
-        assert result["server_id"] == "srv-dur"
-        assert result["project_id"] == "proj-dur"
+    @asynccontextmanager
+    async def session_factory():
+        with Session(engine) as session:
+            yield SimpleNamespace(
+                execute=AsyncMock(side_effect=session.execute),
+                commit=AsyncMock(side_effect=session.commit),
+            )
 
-    @pytest.mark.asyncio
-    async def test_verify_rejects_wrong_token_even_with_db_source(self):
-        """DB 원천이 있어도 잘못된 토큰은 타이밍 안전 비교로 거부(None)."""
-        from waygate.services import k3s_crypto
+    monkeypatch.setattr(waygate_db, "is_db_available", lambda: True)
+    monkeypatch.setattr(waygate_db, "get_session_factory", lambda: session_factory)
+    yield engine
+    engine.dispose()
 
-        real = await waygate_agent_auth.issue_report_token("srv-dur2", "proj-dur")
-        enc = k3s_crypto.encrypt_wg_agent_token(real)
-        r = await waygate_agent_auth._redis()
-        await r.delete(f"{waygate_agent_auth._SRVTOKEN_CACHE_PREFIX}srv-dur2")
-        with (
-            patch("waygate.services.store.get_agent_token_encrypted", AsyncMock(return_value=enc)),
-            patch("waygate.services.store.get_server_by_id", AsyncMock(return_value={"project_id": "proj-dur"})),
-        ):
-            assert await waygate_agent_auth.verify_report_token("srv-dur2", "not-the-real-token") is None
 
-    @pytest.mark.asyncio
-    async def test_revoke_invalidates_cache_and_db(self):
-        """revoke 후에는 캐시·DB 모두 비어 검증이 실패(None)해야 한다."""
-        token = await waygate_agent_auth.issue_report_token("srv-rev", "proj-dur")
-        await waygate_agent_auth.revoke_report_token_by_server("srv-rev")
-        # DB 도 비었다고 가정(set_agent_token(None) 호출됨) — get 이 None 반환
-        with patch("waygate.services.store.get_agent_token_encrypted", AsyncMock(return_value=None)):
-            assert await waygate_agent_auth.verify_report_token("srv-rev", token) is None
+@pytest.mark.asyncio
+class TestAgentTokenRotation:
+    async def test_old_token_remains_valid_until_next_used(self):
+        old = await waygate_agent_auth.issue_report_token("srv-rotation")
+        await waygate_agent_auth.request_token_rotation("srv-rotation")
+        pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+        assert pending is not None and pending != old
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) == {
+            "server_id": "srv-rotation", "project_id": "proj-rotation"
+        }
+        assert await waygate_agent_auth.verify_report_token("another-server", pending) is None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", "wrong-token") is None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is not None
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") is None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) is None
+
+    async def test_stale_redis_credentials_cannot_survive_promotion_or_revocation(self):
+        old = await waygate_agent_auth.issue_report_token("srv-rotation")
+        await waygate_agent_auth.request_token_rotation("srv-rotation")
+        pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+        redis = await waygate_agent_auth._redis()
+        await redis.setex(
+            "afterglow:waygate:srvtoken:srv-rotation", 604800,
+            json.dumps({"token": old, "next_token": pending, "project_id": "proj-rotation"}),
+        )
+        with patch.object(redis, "setex", AsyncMock(side_effect=ConnectionError("Redis unavailable"))):
+            assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is not None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) is None
+        await waygate_agent_auth.revoke_report_token_by_server("srv-rotation")
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is None
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") is None
+
+    async def test_second_rotation_retains_pending_token(self):
+        old = await waygate_agent_auth.issue_report_token("srv-rotation")
+        await waygate_agent_auth.request_token_rotation("srv-rotation")
+        first = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+        await waygate_agent_auth.request_token_rotation("srv-rotation")
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") == first
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) is not None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", first) is not None
+
+    async def test_rotation_requires_active_token(self):
+        with pytest.raises(RuntimeError, match="no active agent token for server"):
+            await waygate_agent_auth.request_token_rotation("srv-rotation")
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") is None
+
+    async def test_failed_rotation_write_preserves_current_credential(self):
+        old = await waygate_agent_auth.issue_report_token("srv-rotation")
+        with patch.object(waygate_db, "set_agent_next_token", AsyncMock(side_effect=RuntimeError("DB unavailable"))):
+            with pytest.raises(RuntimeError, match="DB unavailable"):
+                await waygate_agent_auth.request_token_rotation("srv-rotation")
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") is None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) is not None
+
+    async def test_failed_promotion_cannot_retire_current_credential(self):
+        old = await waygate_agent_auth.issue_report_token("srv-rotation")
+        await waygate_agent_auth.request_token_rotation("srv-rotation")
+        pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+        with patch.object(waygate_db, "promote_agent_token", AsyncMock(side_effect=RuntimeError("DB unavailable"))):
+            assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is None
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) is not None
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") == pending
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is not None
+
+    async def test_database_outage_never_publishes_or_authenticates_credentials(self, monkeypatch):
+        old = await waygate_agent_auth.issue_report_token("srv-rotation")
+        monkeypatch.setattr(waygate_db, "is_db_available", lambda: False)
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await waygate_agent_auth.issue_report_token("srv-rotation")
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await waygate_agent_auth.revoke_report_token_by_server("srv-rotation")
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", old) is None
+
+    @pytest.mark.parametrize("transition", ["promoted", "rotated_again", "revoked"])
+    async def test_delayed_pending_authentication_cannot_restore_retired_token(self, monkeypatch, transition):
+        await waygate_agent_auth.issue_report_token("srv-rotation")
+        await waygate_agent_auth.request_token_rotation("srv-rotation")
+        pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+        entered, resume = asyncio.Event(), asyncio.Event()
+        promote = waygate_db.promote_agent_token
+
+        async def delay_first_promotion(server_id, ciphertext):
+            if not entered.is_set():
+                entered.set()
+                await resume.wait()
+            return await promote(server_id, ciphertext)
+
+        monkeypatch.setattr(waygate_db, "promote_agent_token", delay_first_promotion)
+        delayed = asyncio.create_task(waygate_agent_auth.verify_report_token("srv-rotation", pending))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is not None
+            if transition == "rotated_again":
+                await waygate_agent_auth.request_token_rotation("srv-rotation")
+                replacement = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+                assert await waygate_agent_auth.verify_report_token("srv-rotation", replacement) is not None
+            elif transition == "revoked":
+                await waygate_agent_auth.revoke_report_token_by_server("srv-rotation")
+        finally:
+            resume.set()
+            result = await asyncio.wait_for(delayed, 2)
+        assert (result is not None) == (transition == "promoted")
+        assert (await waygate_agent_auth.verify_report_token("srv-rotation", pending) is not None) == (
+            transition == "promoted"
+        )
+        if transition == "rotated_again":
+            assert await waygate_agent_auth.verify_report_token("srv-rotation", replacement) is not None
+
+    async def test_concurrent_rotation_requests_share_the_durable_pending_token(self, monkeypatch):
+        await waygate_agent_auth.issue_report_token("srv-rotation")
+        entered, resume = asyncio.Event(), asyncio.Event()
+        set_next = waygate_db.set_agent_next_token
+
+        async def delay_first_write(server_id, ciphertext):
+            if not entered.is_set():
+                entered.set()
+                await resume.wait()
+            return await set_next(server_id, ciphertext)
+
+        monkeypatch.setattr(waygate_db, "set_agent_next_token", delay_first_write)
+        delayed = asyncio.create_task(waygate_agent_auth.request_token_rotation("srv-rotation"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            await waygate_agent_auth.request_token_rotation("srv-rotation")
+            pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
+        finally:
+            resume.set()
+            await asyncio.wait_for(delayed, 2)
+        assert await waygate_agent_auth.get_pending_next_token("srv-rotation") == pending
+        assert await waygate_agent_auth.verify_report_token("srv-rotation", pending) is not None
 
 
 # ---------------------------------------------------------------------------

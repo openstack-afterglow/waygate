@@ -182,7 +182,6 @@ _REQUIRED_POLICY_KEYS = frozenset(
     }
 )
 _REDIS_PATTERNS = (
-    "afterglow:waygate:srvtoken:*",
     "afterglow:waygate:status:*",
 )
 

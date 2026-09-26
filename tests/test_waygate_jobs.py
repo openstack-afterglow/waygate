@@ -314,7 +314,11 @@ async def test_server_create_handler_waits_for_durable_enqueue(monkeypatch):
     monkeypatch.setattr(
         server_api,
         "get_settings",
-        lambda: SimpleNamespace(waygate_default_listen_port=51820, waygate_default_tunnel_cidr="10.8.0.0/24"),
+        lambda: SimpleNamespace(
+            waygate_default_listen_port=51820,
+            waygate_default_tunnel_cidr="10.8.0.0/24",
+            waygate_agent_install_mode="prebuilt",
+        ),
     )
     monkeypatch.setattr("waygate.auth.get_admin_connection_for_project", lambda _project_id: conn)
     monkeypatch.setattr("waygate.services.resource_policies.resolve_policy_snapshot", resolve_policy_snapshot)
@@ -330,4 +334,18 @@ async def test_server_create_handler_waits_for_durable_enqueue(monkeypatch):
 
     assert response.status == "CREATING"
     assert calls[0][2]["flavor_id"] == "flavor-1"
+    assert calls[0][2]["agent_install_mode"] == "prebuilt"
     assert calls[0][3] == {"user_id": "user-1", "username": "alice"}
+
+
+async def test_merge_status_exposes_agent_source_and_install_mode(monkeypatch):
+    async def status(_server_id):
+        return {"peers": [], "_stored_at": "2026-01-01T00:00:00+00:00", "agent_source": "prebuilt"}
+
+    monkeypatch.setattr(server_api.waygate_agent_auth, "get_status_result", status)
+    info = await server_api._merge_status({
+        "id": "server-1", "project_id": "project-1", "name": "gateway-1", "status": "ACTIVE",
+        "listen_port": 51820, "tunnel_cidr": "10.8.0.0/24", "agent_install_mode": "prebuilt",
+    })
+    assert info.agent_install_mode == "prebuilt"
+    assert info.agent_source == "prebuilt"

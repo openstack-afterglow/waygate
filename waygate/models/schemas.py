@@ -96,6 +96,10 @@ class WaygateServerInfo(BaseModel):
     dns: str | None = None
     mtu: int | None = None
     server_public_key: str | None = None
+    agent_install_mode: str = "cloud-init"
+    agent_source: str | None = None
+    agent_token_issued_at: str | None = None
+    agent_token_rotation_pending: bool = False
     created_at: str | None = None
     updated_at: str | None = None
     # Redis 최신 상태 병합 (에이전트가 마지막으로 보고한 시각/피어 수)
@@ -305,6 +309,7 @@ class WaygateAgentStatusReport(BaseModel):
 
     peers: list[WaygateAgentPeerState] = Field(default_factory=list, max_length=1000)
     reported_at: str | None = None
+    agent_source: Literal["cloud-init", "prebuilt"] | None = None
 
 
 class WaygateAgentDesiredStatePeer(BaseModel):
@@ -323,3 +328,4 @@ class WaygateAgentDesiredState(BaseModel):
     # Phase 2: 연결된 테넌트 네트워크 CIDR 목록. 에이전트가 각 CIDR 로 향하는 tunnel_cidr
     # 트래픽을 해당 NIC 로 SNAT(MASQUERADE)한다.
     nat_networks: list[str] = []
+    next_token: str | None = None

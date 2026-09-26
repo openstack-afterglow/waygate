@@ -130,7 +130,7 @@ async def provision_waygate_server(
         created_port_id = port["id"]
 
         # 3. reconcile 베어러 토큰 발급
-        bootstrap_token = await waygate_agent_auth.issue_report_token(server_id, project_id)
+        bootstrap_token = await waygate_agent_auth.issue_report_token(server_id)
 
         register_url = f"{callback_base}/v1/servers/{server_id}/agent/register"
         desired_state_url = f"{callback_base}/v1/servers/{server_id}/agent/desired-state"
@@ -139,10 +139,12 @@ async def provision_waygate_server(
         userdata = waygate_config.render_agent_userdata(
             server_name=name,
             listen_port=listen_port,
+            tunnel_cidr=server_record["tunnel_cidr"],
             register_url=register_url,
             desired_state_url=desired_state_url,
             status_url=status_url,
             bootstrap_token=bootstrap_token,
+            install_packages=server_record.get("agent_install_mode", "cloud-init") != "prebuilt",
         )
 
         create_kwargs: dict = {

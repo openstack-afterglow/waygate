@@ -1,0 +1,10 @@
+[Unit]
+Description=Waygate reconcile timer (15s)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

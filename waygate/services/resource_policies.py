@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from waygate.config import get_settings
 from waygate.db import get_session_factory, is_db_available
 from waygate.models.orm import ResourcePolicy
 
@@ -103,12 +104,19 @@ def _is_tenant_network(network: object) -> bool:
     return bool(getattr(network, "is_shared", False) or getattr(network, "is_router_external", False))
 
 
+def _image_property(image: object, key: str) -> str | None:
+    value = (getattr(image, "properties", None) or {}).get(key)
+    return value if value is not None else getattr(image, key, None)
+
+
 def _discover_sync(conn, spec: PolicySpec) -> list[dict[str, Any]]:
     if spec.resource_kind == "image":
+        prebuilt = get_settings().waygate_agent_install_mode == "prebuilt"
         return [
             _option(image.id, image.name, status=getattr(image, "status", None))
             for image in conn.image.images()
             if getattr(image, "visibility", None) in {"public", "community"}
+            and (not prebuilt or _image_property(image, "waygate_agent") == "prebuilt")
         ]
     if spec.resource_kind == "flavor":
         return [
@@ -144,6 +152,14 @@ def _validate_existing_sync(conn, spec: PolicySpec, resource_id: str) -> dict[st
         image = conn.image.get_image(resource_id)
         if image is None or getattr(image, "visibility", None) not in {"public", "community"}:
             raise ResourcePolicyValidationError("selected image is unavailable in the execution scope")
+        if (
+            get_settings().waygate_agent_install_mode == "prebuilt"
+            and _image_property(image, "waygate_agent") != "prebuilt"
+        ):
+            raise ResourcePolicyValidationError(
+                "selected image lacks Glance property waygate_agent=prebuilt "
+                "required by waygate.agent_install_mode=prebuilt"
+            )
         return _option(image.id, image.name)
     if spec.resource_kind == "flavor":
         flavor = conn.compute.get_flavor(resource_id)

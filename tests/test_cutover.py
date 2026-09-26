@@ -121,7 +121,7 @@ async def test_redis_copy_preserves_payload_ttl_and_is_dry_run_safe():
     count = await cutover._copy_redis_pattern(
         source,
         destination,
-        "afterglow:waygate:srvtoken:*",
+        "afterglow:waygate:status:*",
         apply=False,
     )
     assert count == 1

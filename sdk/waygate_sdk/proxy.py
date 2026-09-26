@@ -34,6 +34,10 @@ class Proxy(proxy.Proxy):
     def delete_server(self, server_id):
         return self._json_request("DELETE", f"/v1/servers/{_segment(server_id)}")
 
+    def rotate_agent_token(self, server_id):
+        """Request an agent token handoff; return accepted server metadata."""
+        return self._json_request("POST", f"/v1/servers/{_segment(server_id)}/agent-token/rotate")
+
     def clients(self, server_id):
         return self._json_request("GET", f"/v1/servers/{_segment(server_id)}/clients")
 
