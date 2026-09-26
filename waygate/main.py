@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from waygate.api import agent, attachments, clients, migration, resource_policies, servers
 from waygate.cache import close_cache
@@ -48,6 +49,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_settings().trusted_proxies)
 
 for route in (servers.router, clients.router, attachments.router, migration.router, agent.router):
     app.include_router(route, prefix="/v1/servers")

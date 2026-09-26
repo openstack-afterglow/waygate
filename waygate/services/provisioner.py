@@ -260,7 +260,7 @@ async def delete_waygate_server(project_id: str, server_id: str, user_id: str) -
     except Exception as e:
         _logger.error("waygate_provisioner: delete 시 OpenStack 연결 실패: %s", e)
         await waygate_db.update_server_status(server_id, "ERROR", f"삭제 중 연결 실패: {e}")
-        return
+        raise
 
     try:
         vm_id = server_record.get("server_vm_id")
@@ -271,29 +271,35 @@ async def delete_waygate_server(project_id: str, server_id: str, user_id: str) -
             # 매칭에 실패해 FIP가 누수된다. VM 삭제 전 선제 정리로 방지.
             await asyncio.to_thread(neutron.cleanup_instance_fips, conn, vm_id)
             await asyncio.to_thread(nova.delete_server, conn, vm_id)
-            try:
-                await asyncio.to_thread(nova.wait_server_deleted, conn, vm_id, 120)
-            except Exception:
-                _logger.warning("waygate_provisioner: VM %s 삭제 대기 타임아웃 — 계속 진행", vm_id)
+            await asyncio.to_thread(nova.wait_server_deleted, conn, vm_id, 120)
 
-        # 위 cleanup_instance_fips가 놓쳤을 경우(예: FIP가 이미 disassociate된 상태)에
-        # 대비해 저장된 fip_id로 직접 한 번 더 삭제를 시도한다 (best-effort).
+        # FIP가 이미 disassociate된 경우에도 저장된 ID를 명시적으로 삭제한다.
         if fip_id:
-            try:
-                await asyncio.to_thread(conn.network.delete_ip, fip_id, ignore_missing=True)
-            except Exception:
-                _logger.warning("waygate_provisioner: FIP %s 삭제 실패", fip_id, exc_info=True)
+            await asyncio.to_thread(conn.network.delete_ip, fip_id, ignore_missing=True)
+
+        # VM 삭제만으로 explicit Neutron port가 반드시 없어지는 것은 아니다.
+        # CREATING row는 진행 중인 attach가 port_id를 뒤늦게 기록할 수 있으므로
+        # 다음 시도에서 다시 확인할 수 있도록 terminal DB 전이를 막는다.
+        attachments = await waygate_db.list_server_attachments(server_id)
+        if any(att["status"] == "CREATING" for att in attachments):
+            raise RuntimeError("Waygate attachment creation is still in progress")
+        for att in attachments:
+            if att["port_id"]:
+                await asyncio.to_thread(neutron.delete_port, conn, att["port_id"])
+                await waygate_db.update_attachment(att["id"], port_id=None, status="DELETED")
 
         port_id = server_record.get("provider_port_id")
         if port_id:
             await asyncio.to_thread(neutron.delete_port, conn, port_id)
 
         await waygate_agent_auth.revoke_report_token_by_server(server_id)
-        await waygate_db.soft_delete_server(project_id, server_id, user_id, reason="사용자 요청")
+        if not await waygate_db.soft_delete_server(project_id, server_id, user_id, reason="사용자 요청"):
+            raise RuntimeError("Waygate server deletion could not be finalized")
         _logger.info("waygate_provisioner: server %s 삭제 완료", server_id)
     except Exception as e:
         _logger.error("waygate_provisioner: 삭제 실패 (server=%s): %s", server_id, e, exc_info=True)
         await waygate_db.update_server_status(server_id, "ERROR", f"삭제 실패: {e}")
+        raise
     finally:
         try:
             await asyncio.to_thread(conn.close)

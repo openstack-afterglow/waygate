@@ -121,6 +121,18 @@ class TestCreateClient:
         mock_db.create_client_record.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_create_racing_with_gateway_delete_returns_not_found(self, api_client):
+        _override_token_info()
+        with patch("waygate.api.clients.waygate_db") as mock_db:
+            mock_db.get_server = AsyncMock(return_value=_server_record())
+            mock_db.list_clients = AsyncMock(return_value=[])
+            mock_db.list_active_attachment_cidrs = AsyncMock(return_value=[])
+            mock_db.create_client_record = AsyncMock()
+            mock_db.get_client = AsyncMock(return_value=None)
+            response = await api_client.post("/v1/servers/server-1/clients", json={"name": "laptop"})
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
     async def test_create_client_rejects_when_server_not_active(self, api_client):
         _override_token_info()
         with patch("waygate.api.clients.waygate_db") as mock_db:
@@ -637,12 +649,11 @@ class _FakeSession:
         self._pending = None
 
     async def execute(self, stmt):
-        # soft_delete_client의 select(...).where(id==..., server_id==..., project_id==...,
-        # deleted_at.is_(None)) 를 흉내: 테스트에서는 select 대상 id를 stmt에서 직접
-        # 추출하지 않고, 테스트 헬퍼가 _selected_id를 세팅해 둔 값을 사용한다.
         result = MagicMock()
-        row = self._store.rows.get(getattr(self, "_selected_id", None))
-        result.scalar_one_or_none = MagicMock(return_value=row)
+        if stmt.column_descriptions[0]["entity"].__name__ == "WaygateServer":
+            result.scalar_one_or_none.return_value = SimpleNamespace(status="ACTIVE", deleted_at=None)
+        else:
+            result.scalar_one_or_none.return_value = self._store.rows.get(getattr(self, "_selected_id", None))
         return result
 
 
@@ -696,6 +707,9 @@ class TestVpnDbSoftDeleteRegression:
             "soft_delete_client가 tunnel_ip를 비우지 않으면 재생성 시 unique 충돌이 재발한다"
         )
 
+        assert deleted_row.enabled is False
+        assert deleted_row.private_key_encrypted == ""
+        assert deleted_row.preshared_key_encrypted is None
         # 2) 동일한 이름/IP로 재생성 — 소프트삭제된 행과 더 이상 충돌하지 않아야 한다
         await waygate_db.create_client_record(
             "server-1",

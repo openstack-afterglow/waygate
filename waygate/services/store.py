@@ -28,6 +28,10 @@ class WaygateClientConflictError(Exception):
         super().__init__(f"vpn client unique constraint violation (field={field})")
 
 
+class WaygateServerInactiveError(RuntimeError):
+    """A stale creation request lost the race with server deletion."""
+
+
 # ---------------------------------------------------------------------------
 # 내부 헬퍼 — ORM → dict 변환
 # ---------------------------------------------------------------------------
@@ -139,6 +143,19 @@ async def get_server(project_id: str, server_id: str) -> dict | None:
         return _server_to_dict(server)
 
 
+async def get_server_deletion_state(project_id: str, server_id: str) -> tuple[str, bool] | None:
+    """Read durable terminal state, including soft-deleted rows (worker only)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(WaygateServer.status, WaygateServer.deleted_at).where(
+                WaygateServer.id == server_id, WaygateServer.project_id == project_id
+            )
+        )
+        row = result.one_or_none()
+        return (row[0], row[1] is not None) if row is not None else None
+
+
 async def list_servers(project_id: str, *, limit: int | None = None) -> list[dict]:
     factory = get_session_factory()
     async with factory() as session:
@@ -205,11 +222,13 @@ async def update_server_status(
     """
     factory = get_session_factory()
     async with factory() as session:
-        stmt = select(WaygateServer).where(WaygateServer.id == server_id)
+        stmt = select(WaygateServer).where(WaygateServer.id == server_id).with_for_update()
         result = await session.execute(stmt)
         server = result.scalar_one_or_none()
         if server is None:
             _logger.warning("update_server_status: server %s not found", server_id)
+            return
+        if server.deleted_at is not None:
             return
 
         if status is not None and (only_if_status is None or server.status == only_if_status):
@@ -319,20 +338,53 @@ async def get_agent_tokens_encrypted(server_id: str) -> tuple[str | None, str | 
 
 
 async def soft_delete_server(project_id: str, server_id: str, user_id: str, reason: str = "") -> bool:
+    """Finalize cloud cleanup and all dependent rows in one transaction."""
     factory = get_session_factory()
-    async with factory() as session:
-        stmt = select(WaygateServer).where(
-            WaygateServer.id == server_id, WaygateServer.project_id == project_id, WaygateServer.deleted_at.is_(None)
+    async with factory() as session, session.begin():
+        result = await session.execute(
+            select(WaygateServer)
+            .where(WaygateServer.id == server_id, WaygateServer.project_id == project_id)
+            .with_for_update()
         )
-        result = await session.execute(stmt)
         server = result.scalar_one_or_none()
         if server is None:
             return False
-        server.deleted_at = datetime.now(UTC)
+        if server.deleted_at is not None:
+            return server.status == "DELETED"
+
+        attachments = (
+            await session.execute(select(WaygateNetworkAttachment).where(WaygateNetworkAttachment.server_id == server_id))
+        ).scalars().all()
+        if any(att.status == "CREATING" or att.port_id for att in attachments):
+            raise RuntimeError("Waygate attachment cleanup is incomplete")
+        for att in attachments:
+            await session.delete(att)
+
+        clients = (
+            await session.execute(select(WaygateClient).where(WaygateClient.server_id == server_id))
+        ).scalars().all()
+        now = datetime.now(UTC)
+        for client in clients:
+            if client.deleted_at is None:
+                client.deleted_at = now
+                client.deleted_by_user_id = user_id
+                client.deleted_reason = reason
+            client.enabled = False
+            client.name = None
+            client.tunnel_ip = None
+            client.private_key_encrypted = ""
+            client.preshared_key_encrypted = None
+            client.updated_at = now
+
+        server.agent_token_encrypted = None
+        server.agent_token_next_encrypted = None
+        server.agent_token_rotation_requested_at = None
+        server.deleted_at = now
         server.deleted_by_user_id = user_id
         server.deleted_reason = reason
-        server.status = "DELETING"
-        await session.commit()
+        server.status = "DELETED"
+        server.status_reason = reason
+        server.updated_at = now
         return True
 
 
@@ -352,6 +404,14 @@ async def create_client_record(server_id: str, project_id: str, client_id: str, 
     """
     factory = get_session_factory()
     async with factory() as session:
+        result = await session.execute(
+            select(WaygateServer)
+            .where(WaygateServer.id == server_id, WaygateServer.project_id == project_id)
+            .with_for_update()
+        )
+        server = result.scalar_one_or_none()
+        if server is None or server.deleted_at is not None or server.status != "ACTIVE":
+            raise WaygateClientConflictError()
         client = WaygateClient(
             id=client_id,
             server_id=server_id,
@@ -434,6 +494,15 @@ async def get_client(server_id: str, project_id: str, client_id: str) -> dict | 
 async def update_client(server_id: str, project_id: str, client_id: str, **fields) -> dict | None:
     factory = get_session_factory()
     async with factory() as session:
+        parent = (
+            await session.execute(
+                select(WaygateServer)
+                .where(WaygateServer.id == server_id, WaygateServer.project_id == project_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if parent is None or parent.deleted_at is not None or parent.status == "DELETING":
+            return None
         stmt = select(WaygateClient).where(
             WaygateClient.id == client_id,
             WaygateClient.server_id == server_id,
@@ -478,6 +547,14 @@ async def create_attachment_record(server_id: str, project_id: str, data: dict) 
     """네트워크 연결 레코드 생성 후 dict 반환."""
     factory = get_session_factory()
     async with factory() as session:
+        result = await session.execute(
+            select(WaygateServer)
+            .where(WaygateServer.id == server_id, WaygateServer.project_id == project_id)
+            .with_for_update()
+        )
+        server = result.scalar_one_or_none()
+        if server is None or server.deleted_at is not None or server.status != "ACTIVE":
+            raise WaygateServerInactiveError("Waygate server is no longer active")
         att = WaygateNetworkAttachment(
             server_id=server_id,
             project_id=project_id,
@@ -506,6 +583,16 @@ async def list_attachments(server_id: str, project_id: str) -> list[dict]:
             .order_by(WaygateNetworkAttachment.created_at.asc())
         )
         result = await session.execute(stmt)
+        return [_attachment_to_dict(a) for a in result.scalars().all()]
+
+
+async def list_server_attachments(server_id: str) -> list[dict]:
+    """Worker-only enumeration; cleanup must include every port bound to the server."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(WaygateNetworkAttachment).where(WaygateNetworkAttachment.server_id == server_id)
+        )
         return [_attachment_to_dict(a) for a in result.scalars().all()]
 
 
@@ -597,6 +684,9 @@ async def soft_delete_client(server_id: str, project_id: str, client_id: str, us
         if client is None:
             return False
         client.deleted_at = datetime.now(UTC)
+        client.enabled = False
+        client.private_key_encrypted = ""
+        client.preshared_key_encrypted = None
         client.deleted_by_user_id = user_id
         client.name = None
         client.tunnel_ip = None

@@ -116,6 +116,8 @@ async def create_waygate_client(
     )
 
     client = await waygate_db.get_client(server_id, project_id, client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
     info = await _merge_client_status(client, server_id)
     return WaygateClientCreateResponse(**info.model_dump(), tunnel_conf=tunnel_conf)
 

@@ -26,5 +26,5 @@ def _get_client() -> aioredis.Redis:
 async def close_cache() -> None:
     global _client
     if _client is not None:
-        await _client.aclose()
+        await _client.close()
     _client = None
