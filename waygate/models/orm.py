@@ -115,6 +115,8 @@ class WaygateClient(Base):
     tunnel_ip: Mapped[str | None] = mapped_column(VARCHAR(45))
     allowed_ips: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 클라이언트→서버 방향 route 대상
     dns: Mapped[str | None] = mapped_column(VARCHAR(255))
+    mtu: Mapped[int | None] = mapped_column(INT)
+    persistent_keepalive: Mapped[int] = mapped_column(INT, nullable=False, default=25)
 
     # 타임스탬프
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

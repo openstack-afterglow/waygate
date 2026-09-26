@@ -83,9 +83,12 @@ def _client_to_dict(c: WaygateClient) -> dict:
         "public_key": c.public_key,
         "private_key_encrypted": c.private_key_encrypted,
         "preshared_key_encrypted": c.preshared_key_encrypted,
+        "psk_enabled": bool(c.preshared_key_encrypted),
         "tunnel_ip": c.tunnel_ip,
         "allowed_ips": c.allowed_ips or [],
         "dns": c.dns,
+        "mtu": c.mtu,
+        "persistent_keepalive": c.persistent_keepalive,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "deleted_at": c.deleted_at.isoformat() if c.deleted_at else None,
@@ -424,6 +427,8 @@ async def create_client_record(server_id: str, project_id: str, client_id: str, 
             tunnel_ip=data["tunnel_ip"],
             allowed_ips=data.get("allowed_ips") or [],
             dns=data.get("dns") or None,
+            mtu=data.get("mtu"),
+            persistent_keepalive=data.get("persistent_keepalive", 25),
         )
         session.add(client)
         try:
@@ -501,7 +506,7 @@ async def update_client(server_id: str, project_id: str, client_id: str, **field
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if parent is None or parent.deleted_at is not None or parent.status == "DELETING":
+        if parent is None or parent.deleted_at is not None or parent.status in ("DELETING", "DELETED"):
             return None
         stmt = select(WaygateClient).where(
             WaygateClient.id == client_id,
@@ -513,10 +518,9 @@ async def update_client(server_id: str, project_id: str, client_id: str, **field
         client = result.scalar_one_or_none()
         if client is None:
             return None
-        if "name" in fields and fields["name"] is not None:
-            client.name = fields["name"]
-        if "enabled" in fields and fields["enabled"] is not None:
-            client.enabled = fields["enabled"]
+        for field in ("name", "enabled", "dns", "mtu", "persistent_keepalive"):
+            if field in fields:
+                setattr(client, field, fields[field])
         client.updated_at = datetime.now(UTC)
         await session.commit()
         return _client_to_dict(client)

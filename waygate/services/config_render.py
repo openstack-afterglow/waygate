@@ -85,6 +85,9 @@ def render_client_conf(
     listen_port: int,
     allowed_ips: list[str],
     nat_cidrs: list[str] | None = None,
+    mtu: int | None = None,
+    persistent_keepalive: int = 25,
+    preshared_key: str | None = None,
 ) -> str:
     """클라이언트용 WireGuard `.conf` 파일 텍스트를 렌더한다.
 
@@ -102,14 +105,18 @@ def render_client_conf(
         f"PrivateKey = {private_key}",
         f"Address = {tunnel_ip}/32",
     ]
+    if mtu is not None:
+        lines.append(f"MTU = {mtu}")
     if dns:
         lines.append(f"DNS = {dns}")
     lines.append("")
     lines.append("[Peer]")
     lines.append(f"PublicKey = {server_public_key}")
+    if preshared_key:
+        lines.append(f"PresharedKey = {preshared_key}")
     lines.append(f"Endpoint = {endpoint_ip}:{listen_port}")
     lines.append(f"AllowedIPs = {', '.join(merged)}")
-    lines.append("PersistentKeepalive = 25")
+    lines.append(f"PersistentKeepalive = {persistent_keepalive}")
     lines.append("")
     return "\n".join(lines)
 

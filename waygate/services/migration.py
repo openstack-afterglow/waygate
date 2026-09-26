@@ -5,16 +5,17 @@
 번들에서 제외되고, 대상 서버는 자체 키로 동작한다(엔드포인트/서버 pubkey 가 바뀌므로 클라이언트는
 `.conf` 를 다시 내려받는다).
 
-**클라이언트 private key 처리(3a)**: DB 에는 마스터키(k3s_kubeconfig_encryption_key) 도메인 분리로
+**클라이언트 private key / PSK 처리**: DB 에는 마스터키(k3s_kubeconfig_encryption_key) 도메인 분리로
 암호화 저장돼 있다. export 는 이를 복호화한 뒤 **사용자 패스프레이즈**로 다시 래핑(scrypt→AES-256-GCM)해
-번들에 담는다. 이렇게 하면 (a) 마스터키가 다른 배포로도 이전 가능하고, (b) 클라이언트 키가 보존되어
-기존 peer 신원(public key)이 유지된다. import 는 패스프레이즈로 언래핑 후 대상 배포의 마스터키로
-재암호화한다. 패스프레이즈가 틀리면 GCM 인증 실패로 fail-closed.
+번들에 담는다. 이렇게 하면 마스터키가 다른 배포로도 이전 가능하고, 클라이언트 키와 선택적 PSK 가
+보존된다. import 는 패스프레이즈로 언래핑 후 대상 배포의 마스터키로 재암호화한다.
+패스프레이즈가 틀리면 GCM 인증 실패로 fail-closed. 기존 PSK 없는 번들은 PSK 없이 이전된다.
 """
 
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import logging
 import os
@@ -90,20 +91,28 @@ async def export_bundle(project_id: str, server: dict, passphrase: str) -> dict:
     for c in clients:
         try:
             plain_priv = k3s_crypto.decrypt_wg_client_key(c["private_key_encrypted"])
+            plain_psk = (
+                k3s_crypto.decrypt_wg_client_key(c["preshared_key_encrypted"])
+                if c.get("preshared_key_encrypted")
+                else None
+            )
         except Exception:
-            _logger.error("export: 클라이언트 private key 복호화 실패 (client=%s) — 건너뜀", c["id"])
+            _logger.error("export: 클라이언트 키 복호화 실패 (client=%s) — 건너뜀", c["id"])
             continue
-        client_entries.append(
-            {
-                "name": c["name"],
-                "tunnel_ip": c["tunnel_ip"],
-                "allowed_ips": c.get("allowed_ips") or [],
-                "dns": c.get("dns"),
-                "enabled": c.get("enabled", True),
-                "public_key": c["public_key"],
-                "private_key_wrapped": wrap_with_passphrase(plain_priv, passphrase),
-            }
-        )
+        entry = {
+            "name": c["name"],
+            "tunnel_ip": c["tunnel_ip"],
+            "allowed_ips": c.get("allowed_ips") or [],
+            "dns": c.get("dns"),
+            "mtu": c.get("mtu"),
+            "persistent_keepalive": c.get("persistent_keepalive", 25),
+            "enabled": c.get("enabled", True),
+            "public_key": c["public_key"],
+            "private_key_wrapped": wrap_with_passphrase(plain_priv, passphrase),
+        }
+        if plain_psk is not None:
+            entry["preshared_key_wrapped"] = wrap_with_passphrase(plain_psk, passphrase)
+        client_entries.append(entry)
 
     return {
         "version": BUNDLE_VERSION,
@@ -136,7 +145,7 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
     """번들의 클라이언트를 대상 서버로 재생성한다(키 보존). 네트워크 재연결은 후속(수동)로 안내.
 
     반환: {"imported": n, "skipped": [{"name","reason"}]}
-    각 클라이언트 이름/allowed_ips/dns 는 기존 validator 로 재검증한다(신뢰 금지 — CLAUDE.md §2).
+    각 클라이언트 이름/allowed_ips/dns/mtu/persistent_keepalive 는 기존 request schema 로 재검증한다.
     """
     from waygate.models.schemas import WaygateClientCreateRequest
 
@@ -151,15 +160,19 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
     imported = 0
     skipped: list[dict] = []
 
-    for entry in entries:
+    for index, entry in enumerate(entries):
         name = entry.get("name") if isinstance(entry, dict) else None
         try:
-            # 입력 재검증 — 악의적 번들의 name/CIDR/dns 가 실행 컨텍스트로 흐르지 않도록.
+            # 입력 재검증 — 악의적 번들의 name/CIDR/dns/터널 설정이 실행 컨텍스트로 흐르지 않도록.
             validated = WaygateClientCreateRequest(
                 name=name or "",
                 allowed_ips=entry.get("allowed_ips") or None,
-                dns=entry.get("dns") or None,
+                dns=entry.get("dns"),
+                mtu=entry.get("mtu"),
+                persistent_keepalive=entry.get("persistent_keepalive", 25),
             )
+            if not isinstance(entry.get("enabled", True), bool):
+                raise WaygateMigrationError(422, "클라이언트 enabled 값이 유효하지 않습니다")
             wrapped = entry.get("private_key_wrapped")
             if not wrapped:
                 raise WaygateMigrationError(422, "클라이언트에 private_key_wrapped 가 없습니다")
@@ -168,6 +181,19 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
             derived_pub = waygate_keys.public_key_from_private(plain_priv)
             if entry.get("public_key") and entry["public_key"] != derived_pub:
                 raise WaygateMigrationError(400, "클라이언트 키 무결성 검증 실패")
+
+            encrypted_psk = None
+            if "preshared_key_wrapped" in entry:
+                if not isinstance(entry["preshared_key_wrapped"], str):
+                    raise WaygateMigrationError(422, "클라이언트 PSK 래핑 형식이 유효하지 않습니다")
+                plain_psk = unwrap_with_passphrase(entry["preshared_key_wrapped"], passphrase)
+                try:
+                    decoded_psk = base64.b64decode(plain_psk, validate=True)
+                    if len(decoded_psk) != 32 or base64.b64encode(decoded_psk).decode() != plain_psk:
+                        raise ValueError("invalid PSK encoding")
+                except (ValueError, binascii.Error) as e:
+                    raise WaygateMigrationError(422, "클라이언트 PSK 형식이 유효하지 않습니다") from e
+                encrypted_psk = k3s_crypto.encrypt_wg_client_key(plain_psk)
 
             existing = await waygate_db.list_clients(server_id, project_id)
             used = [c["tunnel_ip"] for c in existing]
@@ -181,20 +207,23 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
                 str(uuid.uuid4()),
                 {
                     "name": validated.name,
-                    "enabled": bool(entry.get("enabled", True)),
+                    "enabled": entry.get("enabled", True),
                     "public_key": derived_pub,
                     "private_key_encrypted": k3s_crypto.encrypt_wg_client_key(plain_priv),
+                    "preshared_key_encrypted": encrypted_psk,
                     "tunnel_ip": tunnel_ip,
                     "allowed_ips": validated.allowed_ips or [],
                     "dns": validated.dns,
+                    "mtu": validated.mtu,
+                    "persistent_keepalive": validated.persistent_keepalive,
                 },
             )
             imported += 1
         except WaygateMigrationError as e:
             skipped.append({"name": name, "reason": e.detail})
         except Exception as e:
-            # 이름 충돌(이미 존재) 등 — 개별 스킵, 나머지는 계속 진행
-            _logger.warning("import: 클라이언트 '%s' 재생성 실패: %s", name, e)
+            # 번들의 값과 예외 메시지에는 비밀이나 로그 주입 문자열이 포함될 수 있다.
+            _logger.warning("import: 클라이언트 재생성 실패 (index=%s, type=%s)", index, type(e).__name__)
             skipped.append({"name": name, "reason": "생성 실패(이름/IP 충돌 또는 검증 오류)"})
 
     return {"imported": imported, "skipped": skipped}

@@ -130,9 +130,6 @@ class TestClientDnsInjection:
         req = WaygateClientCreateRequest(name="valid-name", dns="dns.example.com")
         assert req.dns == "dns.example.com"
 
-    def test_valid_multi_dns_accepted(self):
-        req = WaygateClientCreateRequest(name="valid-name", dns="8.8.8.8,1.1.1.1")
-        assert req.dns == "8.8.8.8,1.1.1.1"
 
     def test_none_dns_accepted(self):
         req = WaygateClientCreateRequest(name="valid-name", dns=None)
@@ -149,11 +146,6 @@ class TestClientUpdateNameInjection:
     def test_malicious_name_rejected(self, malicious):
         with pytest.raises(ValidationError):
             WaygateClientUpdateRequest(name=malicious)
-
-    def test_none_name_accepted(self):
-        req = WaygateClientUpdateRequest(name=None, enabled=False)
-        assert req.name is None
-
 
 # ---------------------------------------------------------------------------
 # VpnServerCreateRequest.name

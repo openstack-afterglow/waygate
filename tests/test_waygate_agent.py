@@ -273,6 +273,51 @@ class TestAgentDesiredStateHappyPath:
         assert body["peers"][0]["public_key"] == "enabled-client-pub-AAAAAAAAAAAAAAAAAAAAAAAAA="
         assert body["peers"][0]["allowed_ips"] == ["10.8.0.2/32"]
 
+    @pytest.mark.asyncio
+    async def test_desired_state_uses_stored_psk_without_generating_for_legacy_client(self, api_client):
+        from waygate.services import k3s_crypto, waygate_keys
+
+        token = await waygate_agent_auth.issue_report_token("server-1")
+        psk = waygate_keys.generate_preshared_key()
+        clients = [
+            {"id": "new", "public_key": "A" * 43 + "=", "preshared_key_encrypted":
+             k3s_crypto.encrypt_wg_client_key(psk), "tunnel_ip": "10.8.0.2", "enabled": True},
+            {"id": "legacy", "public_key": "B" * 43 + "=", "preshared_key_encrypted": None,
+             "tunnel_ip": "10.8.0.3", "enabled": True},
+        ]
+        with patch("waygate.api.agent.waygate_db") as mock_db:
+            mock_db.get_server_by_id = AsyncMock(
+                return_value=_server_record(status="ACTIVE", server_public_key="C" * 43 + "=")
+            )
+            mock_db.list_all_active_clients = AsyncMock(return_value=clients)
+            mock_db.list_active_attachment_cidrs = AsyncMock(return_value=[])
+            response = await api_client.get(
+                "/v1/servers/server-1/agent/desired-state", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 200
+        assert [p["preshared_key"] for p in response.json()["peers"]] == [psk, None]
+
+    @pytest.mark.asyncio
+    async def test_desired_state_drops_peer_when_stored_psk_cannot_be_decrypted(self, api_client):
+        token = await waygate_agent_auth.issue_report_token("server-1")
+        clients = [
+            {"id": "corrupt", "public_key": "A" * 43 + "=", "preshared_key_encrypted": "invalid",
+             "tunnel_ip": "10.8.0.2", "enabled": True},
+            {"id": "legacy", "public_key": "B" * 43 + "=", "preshared_key_encrypted": None,
+             "tunnel_ip": "10.8.0.3", "enabled": True},
+        ]
+        with patch("waygate.api.agent.waygate_db") as mock_db:
+            mock_db.get_server_by_id = AsyncMock(
+                return_value=_server_record(status="ACTIVE", server_public_key="C" * 43 + "=")
+            )
+            mock_db.list_all_active_clients = AsyncMock(return_value=clients)
+            mock_db.list_active_attachment_cidrs = AsyncMock(return_value=[])
+            response = await api_client.get(
+                "/v1/servers/server-1/agent/desired-state", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 200
+        assert [p["public_key"] for p in response.json()["peers"]] == ["B" * 43 + "="]
+
 
 class TestAgentStatusHappyPath:
     @pytest.mark.asyncio
