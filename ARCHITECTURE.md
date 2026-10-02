@@ -6,12 +6,14 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 
 - Repository: [openstack-afterglow/waygate](https://github.com/openstack-afterglow/waygate)
 - 분석한 branch: `dev`; 분석한 작업 트리의 소스 기준일은 이 문서 작성 시점이다.
-- package versions: root distribution/runtime `waygate`, root `uv.lock`, and packaged Kolla registry default are candidate `0.3.0`. SDK distribution/lock are independently versioned candidate `0.2.0` for the added server PATCH API. Published service `v0.2.0` at `5723939` is immutable; it does not contain migration 004, dynamic inheritance or the single-run agent. The source-build default remains immutable commit `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03`, not this candidate: operators must override it with the reviewed release commit. Package Python `>=3.11` (CI/runtime 3.12), FastAPI `0.125.0`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
+- package versions: root distribution/runtime `waygate`, root `uv.lock`, and packaged Kolla registry default are candidate `0.3.0`. SDK distribution/lock are independently versioned candidate `0.2.0` for the added server PATCH API. Published service `v0.2.0` at `5723939` is immutable; it does not contain migration 004, dynamic inheritance or the single-run agent. The source-build default remains immutable commit `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03`, not this candidate: operators must override it with the reviewed release commit. Package Python `>=3.11` (CI/runtime 3.12), FastAPI `0.136.3`, explicit Starlette `>=1.3.1` (root lock `1.3.1`), Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, Pydantic `2.13.4`, Redis client `5.0.0`.
 - 1분 책임 요약: `waygate-api`는 Keystone 인증·project 소유권·API를, `waygate-worker`는 durable provision/delete job을, MariaDB는 정본 레코드와 암호화 자격증명을, Redis는 관측 상태의 보조 캐시를 소유한다. agent 인증은 매번 DB 정본을 확인하며 Redis token cache를 사용하지 않는다. 실제 WireGuard private key와 NAT 적용은 게이트웨이 VM의 agent가 소유한다.
 
 ## Development status
 
 상태와 검증 수준은 서로 다른 축이다. 아래 historical evidence는 해당 날짜와 revision에만 적용된다. `fda693a`와 `682161a`의 DMSLAB rollout 및 기존 timer-based prebuilt image cutover는 과거 운영 증거다. Service `v0.2.0`은 2026-09-26에 tag와 wheel이 발행되었지만 publication은 production deployment가 아니다. 현재 dynamic inheritance, migration 004, single-run agent, lifecycle/logging 변경은 `0.3.0` candidate이며 운영 배포·tag·release를 수행하지 않는다. 새 검증과 아직 필요한 gateway image/운영 검증은 release notes에 구분한다.
+
+Framework remediation after candidate `29f28cdcb572660fc3f693457b007435c0da81ef` selects FastAPI `0.136.3` / Starlette `1.3.1`, outside the five recorded advisory ranges. Existing flat-route SafeAccessLog, auth, middleware, SDK, rate budgets, schema and deployment contracts remain unchanged. Canonical isolated API/worker images ran on aarch64/x86_64 with real MariaDB/Redis and an HTTP Keystone fixture: API/SDK ownership, JSON/null/zero, discovery/redirect normalization, safe INFO/DEBUG logging and both status budgets passed. Missing/wrong Content-Type now returns422; the current shared agent, immutable v0.1.4 cloud-init template and Afterglow JSON transports provide/preserve application/json. The running production prebuilt agent was not inspected. No strictness override or Host-domain policy was added. Separately, the CLI worker installs SIGTERM/SIGINT cancellation handlers and awaits the existing serve cleanup; real Docker shutdown now exits0 rather than the reproduced137. Job lease/retry policy is unchanged. These are local runtime results, not production exploitability, cloud lifecycle, publication or default-branch alert closure. Detailed evidence and final gates remain in the archived change records.
 
 | 기능 | Implementation | Verification evidence | Current limit | Source |
 |---|---|---|---|---|
@@ -56,9 +58,10 @@ flowchart LR
 | 경로 | 핵심 심볼 | 책임과 의존 방향 |
 |---|---|---|
 | [`waygate/main.py`](waygate/main.py), [`waygate/observability.py`](waygate/observability.py) | `app`, `lifespan`, `SafeAccessLog`, `configure_logging` | FastAPI lifespan에서 DB/cache를 열고 닫으며 `/v1` 라우터, discovery, process health를 마운트한다. Uvicorn의 `ProxyHeadersMiddleware`가 설정된 proxy에서 온 scheme/client 주소만 정규화한다. API access 로그는 라우팅된 route template·method·HTTP status만 사용하고 Uvicorn raw-URL access 로그는 끈다. |
+| [`pyproject.toml`](pyproject.toml), [`uv.lock`](uv.lock) | `project.optional-dependencies.service` | Metadata-compatible FastAPI `==0.136.3` and explicit Starlette `>=1.3.1`, locked to `1.3.1`; unrelated versions unchanged. Flat inclusion retains prefixed route templates without a shim; real HTTP/SDK/middleware proof passed on both local architectures. |
 | [`waygate/cache.py`](waygate/cache.py), [`waygate/rate_limit.py`](waygate/rate_limit.py) | `close_cache`, `limiter` | 고정된 Redis 5.0.0의 async `close()`로 연결을 닫고, rate limit은 proxy middleware가 정규화한 client 주소를 사용한다. |
 | [`waygate/auth.py`](waygate/auth.py) | `require_token`, `require_admin`, `validate_token`, `get_admin_connection_for_project` | Keystone `X-Auth-Token`을 검증하고 project-scoped OpenStack connection을 만든다. |
-| [`waygate/worker.py`](waygate/worker.py) | `serve`, `main` | DB를 초기화한 뒤 `process_one_job()`을 반복하는 독립 worker 프로세스다. API와 같은 Waygate 전용 INFO/DEBUG 레벨을 쓴다. |
+| [`waygate/worker.py`](waygate/worker.py) | `serve`, `_main_async`, `main` | DB 초기화·durable job polling은 serve가 소유한다. CLI runner는 SIGTERM/SIGINT에 serve task를 취소하고 기존 finally/close_db 완료를 기다리며 handler를 제거한다. Lease/retry를 바꾸거나 진행 중 cloud job의 drain을 보장하지 않는다. |
 | [`waygate/api/servers.py`](waygate/api/servers.py) | `create_waygate_server`, `delete_waygate_server_endpoint`, `rotate_waygate_agent_token`, `_merge_status` | project 소유권과 API 응답을 담당하고 resource snapshot을 job enqueue에 넘기며 ACTIVE server의 token handoff를 요청한다. |
 | [`waygate/api/agent.py`](waygate/api/agent.py) | `_verify_and_bind`, `register_waygate_agent`, `get_desired_state`, `report_waygate_status` | 사용자 JWT가 아닌 server-scoped agent bearer를 검증하고 VM control channel을 제공한다. |
 | [`waygate/api/clients.py`](waygate/api/clients.py) | `create_waygate_client`, `list_waygate_clients`, `update_waygate_client`, `download_vpn_client_config`, `_merge_client_status` | Per-project issue/edit/download, generated encrypted PSK, and one cached agent report per client listing; no key material in list responses. |
@@ -405,9 +408,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "6de541e17dedd7913d46d4f84140a2bd8880700eccdf121676715359a0da2b8e",
-  "reviewed_at": "2026-10-02T06:19:55Z",
-  "summary": "Reviewed all candidate API/schema/store/migration004, job lease recovery, agent cadence/root installer, SDK negotiated transport, safe access/worker logging, Kolla versions and instruction/CI contracts. Serial and 4-worker gates 469 passed/1 live skip, SDK44, Ruff, isolated MariaDB/Redis/Uvicorn amd64+arm64 and QEMU WireGuard/systemd smoke passed. No CI shape or production change."
+  "source_sha256": "f4a82dc0df31e3b3912156cc2ac004bca47ddf964ee67cf68ec11cf06c3751bc",
+  "reviewed_at": "2026-10-02T12:46:23Z",
+  "summary": "Reviewed compatible FastAPI0.136.3/Starlette1.3.1 floors and flat route templates; real API/SDK/auth/proxy/Content-Type/Host normalization/safe INFO+DEBUG/120+1200 budget proof on isolated amd64+arm64. Separate worker signal runner cancels and awaits existing serve cleanup; durable job lease/retry unchanged. Reproduced Docker137 now0 on both. Serial+4-worker471/1 live skip, SDK44 and Ruff passed. No genuine cloud/production/CI/publication change."
 }
 ```
 <!-- architecture-review:end -->

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 
 from waygate.config import get_settings, require_public_callback_base_url
 from waygate.db import close_db, init_db
@@ -41,10 +42,24 @@ async def serve() -> None:
         _logger.info("worker stage=shutdown status=stopped")
 
 
+async def _main_async() -> None:
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(serve())
+    for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(shutdown_signal, task.cancel)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(shutdown_signal)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     configure_logging()
-    asyncio.run(serve())
+    asyncio.run(_main_async())
 
 
 if __name__ == "__main__":

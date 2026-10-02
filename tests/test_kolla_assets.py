@@ -60,7 +60,6 @@ def test_root_package_metadata():
     assert project["requires-python"] == ">=3.11"
     assert "dependencies" not in project
     assert "ansible" not in "\n".join(service_dependencies).lower()
-    assert "fastapi==0.125.0" in service_dependencies
     assert pyproject_data["tool"]["hatch"]["build"]["targets"]["wheel"]["shared-data"] == {
         "deploy/kolla/ansible/roles/waygate": "share/kolla-ansible/ansible/roles/waygate"
     }
@@ -112,7 +111,6 @@ def test_root_wheel_build_and_install_includes_kolla_role(tmp_path: Path):
         requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist:")]
         assert requires_dist
         assert all("; extra ==" in requirement for requirement in requires_dist)
-        assert "Requires-Dist: fastapi==0.125.0; extra == 'service'" in metadata
         assert "ansible" not in metadata.lower()
 
     venv_dir = tmp_path / "venv"

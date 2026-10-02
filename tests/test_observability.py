@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import signal
+import socket
+import sys
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -90,3 +95,39 @@ async def test_worker_iteration_failure_logs_type_not_exception_value(monkeypatc
     assert "stage=poll status=failed error_type=RuntimeError" in messages
     assert "stage=shutdown status=stopped" in messages
     assert "bootstrap-secret" not in messages
+
+
+@pytest.mark.parametrize("shutdown_signal", [signal.SIGTERM, signal.SIGINT])
+async def test_worker_signal_exits_cleanly_during_pending_database_connection(tmp_path, shutdown_signal):
+    config = tmp_path / "waygate.conf"
+    config.write_text('[waygate]\ncallback_base_url = "https://worker-test.invalid"\n')
+    loop = asyncio.get_running_loop()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.setblocking(False)
+        env = {
+            **os.environ,
+            "WAYGATE_CONFIG_FILE": str(config),
+            "WAYGATE_CALLBACK_BASE_URL": "https://worker-test.invalid",
+            "DATABASE_URL": (
+                f"mysql+aiomysql://synthetic:synthetic@127.0.0.1:"
+                f"{listener.getsockname()[1]}/isolated"
+            ),
+        }
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "waygate.worker", cwd=tmp_path, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        connection = None
+        try:
+            connection, _ = await asyncio.wait_for(loop.sock_accept(listener), timeout=10)
+            process.send_signal(shutdown_signal)
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+            assert process.returncode == 0, output.decode()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+            if connection is not None:
+                connection.close()
