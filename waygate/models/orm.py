@@ -60,6 +60,7 @@ class WaygateServer(Base):
     tunnel_cidr: Mapped[str] = mapped_column(VARCHAR(43), nullable=False, default="10.8.0.0/24")
     dns: Mapped[str | None] = mapped_column(VARCHAR(255))
     mtu: Mapped[int | None] = mapped_column(INT)
+    persistent_keepalive: Mapped[int] = mapped_column(INT, nullable=False, default=25)
 
     # 생성자 정보
     created_by_user_id: Mapped[str | None] = mapped_column(VARCHAR(64), index=True)
@@ -117,6 +118,9 @@ class WaygateClient(Base):
     dns: Mapped[str | None] = mapped_column(VARCHAR(255))
     mtu: Mapped[int | None] = mapped_column(INT)
     persistent_keepalive: Mapped[int] = mapped_column(INT, nullable=False, default=25)
+    # Existing clients remain explicit after migration; only newly opted-in rows inherit.
+    inherit_dns: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, default=False)
+    inherit_persistent_keepalive: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, default=False)
 
     # 타임스탬프
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

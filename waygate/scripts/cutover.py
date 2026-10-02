@@ -181,9 +181,7 @@ _REQUIRED_POLICY_KEYS = frozenset(
         "waygate.flavor",
     }
 )
-_REDIS_PATTERNS = (
-    "afterglow:waygate:status:*",
-)
+_REDIS_PATTERNS = ("afterglow:waygate:status:*",)
 
 
 def _mysql_async_url(raw_url: str) -> URL:

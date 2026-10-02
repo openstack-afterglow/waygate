@@ -75,10 +75,9 @@ async def _wait_for_server(
         if response.status_code == 404 and expected_status == "DELETED":
             return {"status": "DELETED"}
         response.raise_for_status()
-        server = response.json()
-        if server["status"] == "ERROR":
-            pytest.fail(f"Waygate server {server_id} entered ERROR")
-        return server
+        # ERROR is also exposed between durable job attempts. Only the
+        # requested terminal state or the deadline decides this wait.
+        return response.json()
 
     return await _wait_until(
         fetch,
@@ -198,6 +197,7 @@ async def test_live_gateway_full_lifecycle():
     server_id = attachment_id = probe_id = None
     conn = None
     async with httpx.AsyncClient(base_url=base_url, headers={"X-Auth-Token": auth_token}, timeout=30) as client:
+
         async def fetch_server():
             response = await client.get(f"/v1/servers/{server_id}")
             response.raise_for_status()
@@ -213,8 +213,10 @@ async def test_live_gateway_full_lifecycle():
 
         async def wait_peers(count):
             return await _wait_until(
-                fetch_server, lambda value: value.get("peer_count") == count,
-                timeout_seconds, what=f"agent to report {count} peers",
+                fetch_server,
+                lambda value: value.get("peer_count") == count,
+                timeout_seconds,
+                what=f"agent to report {count} peers",
             )
 
         try:
@@ -225,7 +227,10 @@ async def test_live_gateway_full_lifecycle():
             assert response.status_code == 201
             assert server["status"] == "CREATING"
             server = await _wait_for_server(
-                client, server_id, expected_status="ACTIVE", timeout_seconds=timeout_seconds,
+                client,
+                server_id,
+                expected_status="ACTIVE",
+                timeout_seconds=timeout_seconds,
             )
             assert server["server_vm_id"]
             assert server["server_public_key"]
@@ -233,8 +238,10 @@ async def test_live_gateway_full_lifecycle():
             if expected_mode:
                 assert server["agent_install_mode"] == expected_mode
             server = await _wait_until(
-                fetch_server, lambda value: value.get("last_status_reported_at") is not None,
-                timeout_seconds, what="initial agent status report",
+                fetch_server,
+                lambda value: value.get("last_status_reported_at") is not None,
+                timeout_seconds,
+                what="initial agent status report",
             )
             if expected_mode:
                 assert server["agent_source"] == expected_mode
@@ -292,16 +299,22 @@ async def test_live_gateway_full_lifecycle():
             assert response.json()["agent_token_rotation_pending"] is True
             server = await _wait_until(
                 fetch_server,
-                lambda value: value["agent_token_rotation_pending"] is False
-                and _parse_ts(value["agent_token_issued_at"]) > issued_before,
-                timeout_seconds, what="agent token promotion",
+                lambda value: (
+                    value["agent_token_rotation_pending"] is False
+                    and _parse_ts(value["agent_token_issued_at"]) > issued_before
+                ),
+                timeout_seconds,
+                what="agent token promotion",
             )
             promoted_at = _parse_ts(server["agent_token_issued_at"])
             await _wait_until(
                 fetch_server,
-                lambda value: bool(value.get("last_status_reported_at"))
-                and _parse_ts(value["last_status_reported_at"]) > promoted_at,
-                timeout_seconds, what="agent status after token promotion",
+                lambda value: (
+                    bool(value.get("last_status_reported_at"))
+                    and _parse_ts(value["last_status_reported_at"]) > promoted_at
+                ),
+                timeout_seconds,
+                what="agent status after token promotion",
             )
 
             if dataplane:
@@ -327,10 +340,13 @@ async def test_live_gateway_full_lifecycle():
                 await _wait_until(
                     fetch_clients,
                     lambda values: any(
-                        value["id"] == client_id and value.get("online") is True
-                        and value.get("last_handshake_at") is not None for value in values
+                        value["id"] == client_id
+                        and value.get("online") is True
+                        and value.get("last_handshake_at") is not None
+                        for value in values
                     ),
-                    timeout_seconds, what="agent to report the probe handshake",
+                    timeout_seconds,
+                    what="agent to report the probe handshake",
                 )
                 await asyncio.to_thread(conn.compute.delete_server, probe_id, force=True)
                 await asyncio.to_thread(wait_server_deleted, conn, probe_id, timeout=math.ceil(timeout_seconds))
@@ -370,6 +386,7 @@ async def test_live_gateway_full_lifecycle():
                     lambda: asyncio.to_thread(wait_server_deleted, conn, probe_id, timeout=math.ceil(timeout_seconds)),
                 )
             if attachment_id is not None and server_id is not None:
+
                 async def detach():
                     response = await client.delete(f"/v1/servers/{server_id}/networks/{attachment_id}")
                     if response.status_code != 404:
@@ -377,12 +394,16 @@ async def test_live_gateway_full_lifecycle():
 
                 await cleanup(f"detach network {attachment_id}", detach)
             if server_id is not None:
+
                 async def delete_gateway():
                     response = await client.delete(f"/v1/servers/{server_id}")
                     if response.status_code != 404:
                         response.raise_for_status()
                     await _wait_for_server(
-                        client, server_id, expected_status="DELETED", timeout_seconds=timeout_seconds,
+                        client,
+                        server_id,
+                        expected_status="DELETED",
+                        timeout_seconds=timeout_seconds,
                     )
 
                 await cleanup(f"delete gateway {server_id}", delete_gateway)

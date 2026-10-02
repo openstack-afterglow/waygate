@@ -62,7 +62,7 @@ def _server_to_dict(s: WaygateServer) -> dict:
         "listen_port": s.listen_port,
         "tunnel_cidr": s.tunnel_cidr,
         "dns": getattr(s, "dns", None),
-        "mtu": getattr(s, "mtu", None),
+        "persistent_keepalive": s.persistent_keepalive,
         "created_by_user_id": getattr(s, "created_by_user_id", None),
         "created_by_username": getattr(s, "created_by_username", None),
         "created_at": s.created_at.isoformat() if getattr(s, "created_at", None) else None,
@@ -73,7 +73,9 @@ def _server_to_dict(s: WaygateServer) -> dict:
     }
 
 
-def _client_to_dict(c: WaygateClient) -> dict:
+def _client_to_dict(c: WaygateClient, server: WaygateServer | None = None) -> dict:
+    inherit_dns = bool(getattr(c, "inherit_dns", False))
+    inherit_keepalive = bool(getattr(c, "inherit_persistent_keepalive", False))
     return {
         "id": c.id,
         "server_id": c.server_id,
@@ -86,9 +88,13 @@ def _client_to_dict(c: WaygateClient) -> dict:
         "psk_enabled": bool(c.preshared_key_encrypted),
         "tunnel_ip": c.tunnel_ip,
         "allowed_ips": c.allowed_ips or [],
-        "dns": c.dns,
+        "dns": server.dns if server is not None and inherit_dns else c.dns,
         "mtu": c.mtu,
-        "persistent_keepalive": c.persistent_keepalive,
+        "persistent_keepalive": (
+            server.persistent_keepalive if server is not None and inherit_keepalive else c.persistent_keepalive
+        ),
+        "inherit_dns": inherit_dns,
+        "inherit_persistent_keepalive": inherit_keepalive,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "deleted_at": c.deleted_at.isoformat() if c.deleted_at else None,
@@ -117,7 +123,7 @@ def add_server_record(session, project_id: str, server_id: str, data: dict) -> W
         listen_port=int(data.get("listen_port") or 51820),
         tunnel_cidr=data.get("tunnel_cidr") or "10.8.0.0/24",
         dns=data.get("dns") or None,
-        mtu=data.get("mtu") or None,
+        persistent_keepalive=data.get("persistent_keepalive", 25),
         created_by_user_id=data.get("created_by_user_id") or None,
         created_by_username=data.get("created_by_username") or None,
     )
@@ -143,6 +149,34 @@ async def get_server(project_id: str, server_id: str) -> dict | None:
         server = result.scalar_one_or_none()
         if server is None:
             return None
+        return _server_to_dict(server)
+
+
+async def update_server_defaults(project_id: str, server_id: str, fields: dict) -> dict | None:
+    """Lock and update only live DNS/keepalive defaults owned by this project."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(WaygateServer)
+            .where(
+                WaygateServer.id == server_id,
+                WaygateServer.project_id == project_id,
+                WaygateServer.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        server = result.scalar_one_or_none()
+        if server is None:
+            return None
+        if server.status != "ACTIVE":
+            raise WaygateServerInactiveError("Waygate server is not active")
+        for key, value in fields.items():
+            if key not in {"dns", "persistent_keepalive"}:
+                raise ValueError(f"Unsupported server default: {key}")
+            setattr(server, key, value)
+        if fields:
+            server.updated_at = datetime.now(UTC)
+            await session.commit()
         return _server_to_dict(server)
 
 
@@ -356,16 +390,22 @@ async def soft_delete_server(project_id: str, server_id: str, user_id: str, reas
             return server.status == "DELETED"
 
         attachments = (
-            await session.execute(select(WaygateNetworkAttachment).where(WaygateNetworkAttachment.server_id == server_id))
-        ).scalars().all()
+            (
+                await session.execute(
+                    select(WaygateNetworkAttachment).where(WaygateNetworkAttachment.server_id == server_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
         if any(att.status == "CREATING" or att.port_id for att in attachments):
             raise RuntimeError("Waygate attachment cleanup is incomplete")
         for att in attachments:
             await session.delete(att)
 
         clients = (
-            await session.execute(select(WaygateClient).where(WaygateClient.server_id == server_id))
-        ).scalars().all()
+            (await session.execute(select(WaygateClient).where(WaygateClient.server_id == server_id))).scalars().all()
+        )
         now = datetime.now(UTC)
         for client in clients:
             if client.deleted_at is None:
@@ -426,9 +466,11 @@ async def create_client_record(server_id: str, project_id: str, client_id: str, 
             preshared_key_encrypted=data.get("preshared_key_encrypted") or None,
             tunnel_ip=data["tunnel_ip"],
             allowed_ips=data.get("allowed_ips") or [],
-            dns=data.get("dns") or None,
+            dns=data.get("dns"),
             mtu=data.get("mtu"),
             persistent_keepalive=data.get("persistent_keepalive", 25),
+            inherit_dns=data.get("inherit_dns", "dns" not in data),
+            inherit_persistent_keepalive=data.get("inherit_persistent_keepalive", "persistent_keepalive" not in data),
         )
         session.add(client)
         try:
@@ -459,16 +501,19 @@ async def list_clients(server_id: str, project_id: str) -> list[dict]:
     factory = get_session_factory()
     async with factory() as session:
         stmt = (
-            select(WaygateClient)
+            select(WaygateClient, WaygateServer)
+            .join(WaygateServer, WaygateClient.server_id == WaygateServer.id)
             .where(
                 WaygateClient.server_id == server_id,
                 WaygateClient.project_id == project_id,
                 WaygateClient.deleted_at.is_(None),
+                WaygateServer.project_id == project_id,
+                WaygateServer.deleted_at.is_(None),
             )
             .order_by(WaygateClient.created_at.desc())
         )
         result = await session.execute(stmt)
-        return [_client_to_dict(c) for c in result.scalars().all()]
+        return [_client_to_dict(c, server) for c, server in result.all()]
 
 
 async def list_all_active_clients(server_id: str) -> list[dict]:
@@ -483,17 +528,23 @@ async def list_all_active_clients(server_id: str) -> list[dict]:
 async def get_client(server_id: str, project_id: str, client_id: str) -> dict | None:
     factory = get_session_factory()
     async with factory() as session:
-        stmt = select(WaygateClient).where(
-            WaygateClient.id == client_id,
-            WaygateClient.server_id == server_id,
-            WaygateClient.project_id == project_id,
-            WaygateClient.deleted_at.is_(None),
+        stmt = (
+            select(WaygateClient, WaygateServer)
+            .join(WaygateServer, WaygateClient.server_id == WaygateServer.id)
+            .where(
+                WaygateClient.id == client_id,
+                WaygateClient.server_id == server_id,
+                WaygateClient.project_id == project_id,
+                WaygateClient.deleted_at.is_(None),
+                WaygateServer.project_id == project_id,
+                WaygateServer.deleted_at.is_(None),
+            )
         )
         result = await session.execute(stmt)
-        client = result.scalar_one_or_none()
-        if client is None:
+        row = result.one_or_none()
+        if row is None:
             return None
-        return _client_to_dict(client)
+        return _client_to_dict(*row)
 
 
 async def update_client(server_id: str, project_id: str, client_id: str, **fields) -> dict | None:
@@ -518,12 +569,28 @@ async def update_client(server_id: str, project_id: str, client_id: str, **field
         client = result.scalar_one_or_none()
         if client is None:
             return None
-        for field in ("name", "enabled", "dns", "mtu", "persistent_keepalive"):
+        if "dns" in fields:
+            fields.setdefault("inherit_dns", False)
+        if "persistent_keepalive" in fields:
+            fields.setdefault("inherit_persistent_keepalive", False)
+        for field in (
+            "name",
+            "enabled",
+            "dns",
+            "mtu",
+            "persistent_keepalive",
+            "inherit_dns",
+            "inherit_persistent_keepalive",
+        ):
             if field in fields:
                 setattr(client, field, fields[field])
+        if fields.get("inherit_dns"):
+            client.dns = None
+        if fields.get("inherit_persistent_keepalive"):
+            client.persistent_keepalive = 25
         client.updated_at = datetime.now(UTC)
         await session.commit()
-        return _client_to_dict(client)
+        return _client_to_dict(client, parent)
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +744,15 @@ async def soft_delete_client(server_id: str, project_id: str, client_id: str, us
     """
     factory = get_session_factory()
     async with factory() as session:
+        parent = (
+            await session.execute(
+                select(WaygateServer)
+                .where(WaygateServer.id == server_id, WaygateServer.project_id == project_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if parent is None or parent.deleted_at is not None:
+            return False
         stmt = select(WaygateClient).where(
             WaygateClient.id == client_id,
             WaygateClient.server_id == server_id,

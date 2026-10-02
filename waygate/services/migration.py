@@ -121,7 +121,6 @@ async def export_bundle(project_id: str, server: dict, passphrase: str) -> dict:
             "listen_port": server.get("listen_port"),
             "tunnel_cidr": server.get("tunnel_cidr"),
             "dns": server.get("dns"),
-            "mtu": server.get("mtu"),
         },
         "clients": client_entries,
         "network_attachments": [
@@ -215,6 +214,8 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
                     "allowed_ips": validated.allowed_ips or [],
                     "dns": validated.dns,
                     "mtu": validated.mtu,
+                    "inherit_dns": False,
+                    "inherit_persistent_keepalive": False,
                     "persistent_keepalive": validated.persistent_keepalive,
                 },
             )

@@ -57,6 +57,7 @@ def _merge_client_status(client: dict, status_result: dict | None) -> WaygateCli
     info.psk_enabled = bool(client.get("preshared_key_encrypted"))
     if status_result:
         info.last_reported_at = status_result.get("_stored_at")
+        info.report_interval_seconds = status_result.get("report_interval_seconds")
         info.online = False
         for peer in status_result.get("peers", []):
             if peer.get("public_key") == client["public_key"]:
@@ -101,24 +102,27 @@ async def create_waygate_client(
     private_key_encrypted = k3s_crypto.encrypt_wg_client_key(private_key)
 
     allowed_ips = body.allowed_ips or [server["tunnel_cidr"]]
+    data = {
+        "name": body.name,
+        "enabled": True,
+        "public_key": public_key,
+        "private_key_encrypted": private_key_encrypted,
+        "preshared_key_encrypted": k3s_crypto.encrypt_wg_client_key(preshared_key),
+        "tunnel_ip": tunnel_ip,
+        "allowed_ips": allowed_ips,
+    }
+    for field in ("dns", "mtu", "persistent_keepalive"):
+        if field in body.model_fields_set:
+            data[field] = getattr(body, field)
+    for field, flag in (("dns", "inherit_dns"), ("persistent_keepalive", "inherit_persistent_keepalive")):
+        data[flag] = field not in body.model_fields_set
 
     try:
         await waygate_db.create_client_record(
             server_id,
             project_id,
             client_id,
-            {
-                "name": body.name,
-                "enabled": True,
-                "public_key": public_key,
-                "private_key_encrypted": private_key_encrypted,
-                "preshared_key_encrypted": k3s_crypto.encrypt_wg_client_key(preshared_key),
-                "tunnel_ip": tunnel_ip,
-                "allowed_ips": allowed_ips,
-                "dns": body.dns,
-                "mtu": body.mtu,
-                "persistent_keepalive": body.persistent_keepalive,
-            },
+            data,
         )
     except WaygateClientConflictError as exc:
         if exc.field == "name":
@@ -129,24 +133,24 @@ async def create_waygate_client(
             detail = "클라이언트 생성 중 충돌이 발생했습니다. 잠시 후 다시 시도해주세요"
         raise HTTPException(status_code=409, detail=detail) from exc
 
+    client = await waygate_db.get_client(server_id, project_id, client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
     nat_cidrs = await waygate_db.list_active_attachment_cidrs(server_id)
     tunnel_conf = waygate_config.render_client_conf(
         private_key=private_key,
-        tunnel_ip=tunnel_ip,
-        dns=body.dns,
-        mtu=body.mtu,
-        persistent_keepalive=body.persistent_keepalive,
+        tunnel_ip=client["tunnel_ip"],
+        dns=client.get("dns"),
+        mtu=client.get("mtu"),
+        persistent_keepalive=client.get("persistent_keepalive", 25),
         preshared_key=preshared_key,
         server_public_key=server["server_public_key"],
         endpoint_ip=server["endpoint_ip"] or "",
         listen_port=server["listen_port"],
-        allowed_ips=allowed_ips,
+        allowed_ips=client.get("allowed_ips") or [server["tunnel_cidr"]],
         nat_cidrs=nat_cidrs,
     )
 
-    client = await waygate_db.get_client(server_id, project_id, client_id)
-    if client is None:
-        raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
     info = _merge_client_status(client, await waygate_agent_auth.get_status_result(server_id))
     return WaygateClientCreateResponse(**info.model_dump(), tunnel_conf=tunnel_conf)
 

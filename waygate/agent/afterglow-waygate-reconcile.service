@@ -1,10 +1,16 @@
 [Unit]
-Description=Waygate reconcile (desired-state sync + status report)
+Description=Waygate gateway agent (reconcile and report)
 After=network-online.target wg-quick@wg0.service
 Wants=network-online.target
+ConditionPathExists=/etc/waygate/agent.json
 
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 /opt/afterglow/waygate_agent.py reconcile
+Type=simple
+ExecStart=/usr/bin/python3 /opt/afterglow/waygate_agent.py run
+Restart=on-failure
+RestartSec=5s
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

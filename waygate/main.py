@@ -17,6 +17,7 @@ from waygate.cache import close_cache
 from waygate.config import get_settings, require_public_callback_base_url
 from waygate.db import close_db, init_db
 from waygate.models.schemas import HealthResponse, RootDiscoveryResponse, VersionDiscoveryResponse
+from waygate.observability import SafeAccessLog, configure_logging
 from waygate.rate_limit import limiter
 
 _logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ _logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    configure_logging()
     settings = get_settings()
     require_public_callback_base_url(settings)
     init_db(
@@ -33,11 +35,13 @@ async def lifespan(_app: FastAPI):
         connect_timeout=settings.database_connect_timeout,
         pool_timeout=settings.database_pool_timeout,
     )
+    _logger.info("api stage=ready status=started")
     try:
         yield
     finally:
         await close_cache()
         await close_db()
+        _logger.info("api stage=shutdown status=stopped")
 
 
 app = FastAPI(
@@ -50,6 +54,7 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_settings().trusted_proxies)
+app.add_middleware(SafeAccessLog)
 
 for route in (servers.router, clients.router, attachments.router, migration.router, agent.router):
     app.include_router(route, prefix="/v1/servers")
@@ -83,4 +88,4 @@ async def health():
 
 
 def run() -> None:
-    uvicorn.run("waygate.main:app", host="0.0.0.0", port=8010)
+    uvicorn.run("waygate.main:app", host="0.0.0.0", port=8010, access_log=False)

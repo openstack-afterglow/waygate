@@ -2,7 +2,7 @@
 
 from waygate_sdk.service import WaygateService
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def register(conn):

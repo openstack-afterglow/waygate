@@ -4,9 +4,12 @@
 - export: 서버 private key 미포함, 클라이언트 private key/PSK 는 래핑되어 포함.
 - import: 키/터널 설정 보존, 레거시 번들 호환, 잘못된 설정/PSK 거부.
 - API: export/import 소유권(IDOR), 패스프레이즈 최소 길이 검증.
+- SQL: 기존 서버 DNS/MTU 보존, keepalive 기본값 및 NOT NULL 제약.
 """
 
 import json
+import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +17,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from waygate.main import app
+from waygate.scripts import migrate
 from waygate.services import k3s_crypto, waygate_keys, waygate_migration
 from waygate.services.migration import WaygateMigrationError
 
@@ -534,3 +538,55 @@ class TestMigrationApi:
             )
         assert resp.status_code == 200
         assert resp.json()["imported"] == 2
+
+
+@pytest.mark.parametrize("dns,mtu", [(None, None), ("9.9.9.9, 1.1.1.1", 1420)])
+def test_server_defaults_sql_migration_preserves_existing_settings(dns, mtu):
+    """Exercise the shipped DDL, not ORM defaults, against a pre-004 server row."""
+    migration = next(entry for entry in migrate.load_manifest() if entry.logical_id == "004_server_client_defaults")
+    with closing(sqlite3.connect(":memory:")) as connection:
+        # Minimal pre-004 schema: DNS and MTU already exist in the baseline.
+        connection.execute(
+            "CREATE TABLE waygate_servers (id CHAR(36) NOT NULL PRIMARY KEY, dns VARCHAR(255) NULL, mtu INT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE waygate_clients ("
+            "id CHAR(36) NOT NULL PRIMARY KEY, dns VARCHAR(255) NULL, "
+            "persistent_keepalive INT NOT NULL DEFAULT 25)"
+        )
+        connection.execute(
+            "INSERT INTO waygate_clients (id, dns, persistent_keepalive) VALUES ('existing-client', '8.8.8.8', 15)"
+        )
+        connection.execute(
+            "INSERT INTO waygate_servers (id, dns, mtu) VALUES (?, ?, ?)",
+            ("existing", dns, mtu),
+        )
+        for statement in migrate._statements(migrate.MIGRATIONS / migration.relative_path):
+            # SQLite lacks ADD COLUMN IF NOT EXISTS; this checks row semantics,
+            # not MariaDB's idempotent DDL execution.
+            connection.execute(statement.replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN"))
+
+        assert connection.execute("SELECT id, dns, mtu, persistent_keepalive FROM waygate_servers").fetchall() == [
+            ("existing", dns, mtu, 25)
+        ]
+        assert connection.execute(
+            "SELECT dns, persistent_keepalive, inherit_dns, inherit_persistent_keepalive "
+            "FROM waygate_clients WHERE id = 'existing-client'"
+        ).fetchone() == ("8.8.8.8", 15, 0, 0)
+        connection.execute("INSERT INTO waygate_clients (id) VALUES ('new-client')")
+        assert connection.execute(
+            "SELECT inherit_dns, inherit_persistent_keepalive FROM waygate_clients WHERE id = 'new-client'"
+        ).fetchone() == (0, 0)
+
+        connection.execute("INSERT INTO waygate_servers (id) VALUES ('new')")
+        assert connection.execute("SELECT persistent_keepalive FROM waygate_servers WHERE id = 'new'").fetchone() == (
+            25,
+        )
+
+        connection.execute("UPDATE waygate_servers SET persistent_keepalive = 0 WHERE id = 'existing'")
+        assert connection.execute(
+            "SELECT dns, mtu, persistent_keepalive FROM waygate_servers WHERE id = 'existing'"
+        ).fetchone() == (dns, mtu, 0)
+
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed"):
+            connection.execute("UPDATE waygate_servers SET persistent_keepalive = NULL WHERE id = 'existing'")

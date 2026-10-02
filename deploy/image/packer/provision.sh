@@ -31,8 +31,8 @@ path.chmod(0o644)
 PY
 python3 -m py_compile /opt/afterglow/waygate_agent.py
 systemctl daemon-reload
-# Instance cloud-init enables the timer only after writing agent.json.
-systemctl disable afterglow-waygate-reconcile.timer
+# Instance cloud-init enables the service only after writing agent.json.
+systemctl disable afterglow-waygate-reconcile.service
 [ ! -e /etc/waygate/agent.json ]
 [ ! -e /etc/wireguard/privatekey ]
 apt-get clean

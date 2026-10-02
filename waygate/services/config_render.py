@@ -15,13 +15,14 @@ AGENT_DIR = Path(__file__).parent.parent / "agent"
 AGENT_FILES: tuple[tuple[str, str, str], ...] = (
     ("waygate_agent.py", "/opt/afterglow/waygate_agent.py", "0750"),
     ("afterglow-waygate-reconcile.service", "/etc/systemd/system/afterglow-waygate-reconcile.service", "0644"),
-    ("afterglow-waygate-reconcile.timer", "/etc/systemd/system/afterglow-waygate-reconcile.timer", "0644"),
     ("99-afterglow-wg-forward.conf", "/etc/sysctl.d/99-afterglow-wg-forward.conf", "0644"),
 )
 
 
 def agent_packages() -> list[str]:
-    return [line for raw in agent_asset("packages.txt").splitlines() if (line := raw.strip()) and not line.startswith("#")]
+    return [
+        line for raw in agent_asset("packages.txt").splitlines() if (line := raw.strip()) and not line.startswith("#")
+    ]
 
 
 def agent_asset(name: str) -> str:
@@ -190,6 +191,7 @@ def render_agent_userdata(
         "listen_port": listen_port,
         "tunnel_cidr": tunnel_cidr,
         "tunnel_address": f"{server_tunnel_ip(tunnel_cidr)}/{network.prefixlen}",
+        "report_interval_seconds": 1,
         "agent_install_mode": "cloud-init" if install_packages else "prebuilt",
     }
     yaml_str = _jinja.get_template("waygate_agent.yaml.j2").render(

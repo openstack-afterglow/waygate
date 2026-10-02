@@ -142,9 +142,15 @@ class TestCreateClient:
             mock_db.get_client = AsyncMock(side_effect=load)
             with patch("waygate.api.clients.waygate_agent_auth") as mock_auth:
                 mock_auth.get_status_result = AsyncMock(return_value=None)
-                first = await api_client.post("/v1/servers/server-1/clients", json={
-                    "name": "laptop", "dns": "1.1.1.1", "mtu": 1380, "persistent_keepalive": 0,
-                })
+                first = await api_client.post(
+                    "/v1/servers/server-1/clients",
+                    json={
+                        "name": "laptop",
+                        "dns": "1.1.1.1",
+                        "mtu": 1380,
+                        "persistent_keepalive": 0,
+                    },
+                )
                 second = await api_client.post("/v1/servers/server-1/clients", json={"name": "tablet"})
             download = await api_client.get(f"/v1/servers/server-1/clients/{first.json()['id']}/config")
             mock_db.list_clients = AsyncMock(return_value=list(records.values()))
@@ -169,9 +175,23 @@ class TestCreateClient:
     @pytest.mark.asyncio
     async def test_create_rejects_invalid_tunnel_settings(self, api_client):
         _override_token_info()
-        for fields in ({"dns": "1.1.1.1\\n[Peer]"}, {"dns": "a,b,c"},
-                       {"mtu": 575}, {"mtu": True}, {"persistent_keepalive": -1},
-                       {"persistent_keepalive": None}, {"preshared_key": "attacker"}):
+        for fields in (
+            {"dns": "1.1.1.1\\n[Peer]"},
+            {"dns": "a,b,c"},
+            {"mtu": 575},
+            {"mtu": True},
+            {"persistent_keepalive": -1},
+            {"persistent_keepalive": None},
+            {"persistent_keepalive": True},
+            {"inherit_dns": None},
+            {"inherit_dns": "false"},
+            {"inherit_dns": False},
+            {"inherit_dns": True, "dns": None},
+            {"inherit_persistent_keepalive": False},
+            {"inherit_persistent_keepalive": 1},
+            {"inherit_persistent_keepalive": True, "persistent_keepalive": 0},
+            {"preshared_key": "attacker"},
+        ):
             response = await api_client.post("/v1/servers/server-1/clients", json={"name": "laptop", **fields})
             assert response.status_code == 422
 
@@ -392,11 +412,14 @@ class TestListClients:
         now = datetime.now(UTC).isoformat()
         with patch("waygate.api.clients.waygate_db") as mock_db:
             mock_db.get_server = AsyncMock(return_value=_server_record())
-            mock_db.list_clients = AsyncMock(return_value=[_client_record(), _client_record(id="client-2", public_key="other")])
+            mock_db.list_clients = AsyncMock(
+                return_value=[_client_record(), _client_record(id="client-2", public_key="other")]
+            )
             with patch("waygate.api.clients.waygate_agent_auth") as mock_auth:
                 mock_auth.get_status_result = AsyncMock(
                     return_value={
                         "_stored_at": now,
+                        "report_interval_seconds": 3,
                         "peers": [
                             {
                                 "public_key": "client-pub-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -413,9 +436,11 @@ class TestListClients:
         body = resp.json()
         assert body[0]["online"] is True
         assert body[0]["last_reported_at"] == now
+        assert body[0]["report_interval_seconds"] == 3
         assert body[0]["rx_bytes"] == 100
         assert body[1]["online"] is False
         assert body[1]["last_reported_at"] == now
+        assert body[1]["report_interval_seconds"] == 3
 
     @pytest.mark.asyncio
     async def test_stale_handshake_or_report_is_offline_but_keeps_observed_timestamps(self, api_client):
@@ -427,14 +452,17 @@ class TestListClients:
                 mock_db.get_server = AsyncMock(return_value=_server_record())
                 mock_db.list_clients = AsyncMock(return_value=[_client_record()])
                 with patch("waygate.api.clients.waygate_agent_auth") as mock_auth:
-                    mock_auth.get_status_result = AsyncMock(return_value={
-                        "_stored_at": report,
-                        "peers": [{"public_key": _client_record()["public_key"], "last_handshake_at": handshake}],
-                    })
+                    mock_auth.get_status_result = AsyncMock(
+                        return_value={
+                            "_stored_at": report,
+                            "peers": [{"public_key": _client_record()["public_key"], "last_handshake_at": handshake}],
+                        }
+                    )
                     response = await api_client.get("/v1/servers/server-1/clients")
             assert response.json()[0]["online"] is False
             assert response.json()[0]["last_reported_at"] == report
             assert response.json()[0]["last_handshake_at"] == handshake
+            assert response.json()[0]["report_interval_seconds"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -527,28 +555,23 @@ class TestUpdateDeleteClient:
         assert resp.json()["enabled"] is False
 
     @pytest.mark.asyncio
-    async def test_patch_clears_nullable_fields_without_resetting_omitted_values(self, api_client):
-        _override_token_info()
-        with patch("waygate.api.clients.waygate_db") as mock_db:
-            mock_db.get_server = AsyncMock(return_value=_server_record())
-            mock_db.update_client = AsyncMock(return_value=_client_record(dns=None, mtu=None, persistent_keepalive=0))
-            with patch("waygate.api.clients.waygate_agent_auth") as mock_auth:
-                mock_auth.get_status_result = AsyncMock(return_value=None)
-                response = await api_client.patch("/v1/servers/server-1/clients/client-1", json={
-                    "dns": None, "mtu": None, "persistent_keepalive": 0,
-                })
-        assert response.status_code == 200
-        assert response.json()["persistent_keepalive"] == 0
-        assert response.json()["dns"] is None and response.json()["mtu"] is None
-        mock_db.update_client.assert_awaited_once_with(
-            "server-1", "test-project-123", "client-1", dns=None, mtu=None, persistent_keepalive=0
-        )
-
-    @pytest.mark.asyncio
     async def test_patch_rejects_null_nonnullable_and_injection(self, api_client):
         _override_token_info()
-        for fields in ({"name": None}, {"enabled": None}, {"persistent_keepalive": None},
-                       {"dns": "evil\\nMTU = 42"}, {"mtu": 10000}, {"psk_enabled": True}):
+        for fields in (
+            {"name": None},
+            {"enabled": None},
+            {"persistent_keepalive": None},
+            {"dns": "evil\\nMTU = 42"},
+            {"mtu": 10000},
+            {"psk_enabled": True},
+            {"inherit_dns": None},
+            {"inherit_dns": "true"},
+            {"inherit_dns": False},
+            {"inherit_dns": True, "dns": None},
+            {"inherit_persistent_keepalive": False},
+            {"inherit_persistent_keepalive": 1},
+            {"inherit_persistent_keepalive": True, "persistent_keepalive": 0},
+        ):
             response = await api_client.patch("/v1/servers/server-1/clients/client-1", json=fields)
             assert response.status_code == 422
 
@@ -644,16 +667,24 @@ class TestRenderClientConf:
         )
         assert conf.index("[Interface]") < conf.index("[Peer]")
 
-
     def test_conf_renders_zero_keepalive_and_optional_psk_mtu(self):
         conf = waygate_config.render_client_conf(
-            private_key="private", tunnel_ip="10.8.0.2", dns=None,
-            server_public_key="public", endpoint_ip="203.0.113.10", listen_port=51820,
-            allowed_ips=["10.8.0.0/24"], mtu=1380, persistent_keepalive=0, preshared_key="psk",
+            private_key="private",
+            tunnel_ip="10.8.0.2",
+            dns=None,
+            server_public_key="public",
+            endpoint_ip="203.0.113.10",
+            listen_port=51820,
+            allowed_ips=["10.8.0.0/24"],
+            mtu=1380,
+            persistent_keepalive=0,
+            preshared_key="psk",
         )
         assert "MTU = 1380" in conf.split("[Peer]")[0]
         assert "PresharedKey = psk" in conf.split("[Peer]")[1]
         assert "PersistentKeepalive = 0" in conf
+
+
 class TestDownloadClientConfigEndpoint:
     @pytest.mark.asyncio
     async def test_download_config_returns_conf_with_content_disposition(self, api_client):
@@ -766,7 +797,13 @@ class _FakeSession:
     async def execute(self, stmt):
         result = MagicMock()
         if stmt.column_descriptions[0]["entity"].__name__ == "WaygateServer":
-            result.scalar_one_or_none.return_value = SimpleNamespace(status="ACTIVE", deleted_at=None)
+            result.scalar_one_or_none.return_value = SimpleNamespace(
+                status="ACTIVE",
+                deleted_at=None,
+                dns=None,
+                mtu=None,
+                persistent_keepalive=25,
+            )
         else:
             result.scalar_one_or_none.return_value = self._store.rows.get(getattr(self, "_selected_id", None))
         return result
