@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Waygate gateway agent: `register` bootstraps WireGuard; `reconcile` syncs desired state and reports status.
+"""Waygate agent: `register` bootstraps and `run` reconciles and reports.
 
-Runtime settings come from /etc/waygate/agent.json. Stdlib-only and Python 3.10 compatible.
+A single long-lived process serializes 15-second desired-state reconciliation with
+configurable 1–60-second status reports (one second by default). It reloads the
+root-only config for every operation so reporting follows durable bearer rotation.
+Failed WireGuard reads never replace the last report with an empty peer list.
+Stdlib-only and Python 3.10 compatible.
 """
+
 import ipaddress
 import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -68,9 +74,7 @@ def ensure_keypair() -> tuple[str, str]:
     if not os.path.exists(PRIVATE_KEY_PATH):
         previous_umask = os.umask(0o077)
         try:
-            private = subprocess.run(
-                ["wg", "genkey"], capture_output=True, text=True, check=True
-            ).stdout.strip()
+            private = subprocess.run(["wg", "genkey"], capture_output=True, text=True, check=True).stdout.strip()
             public = subprocess.run(
                 ["wg", "pubkey"], input=private + "\n", capture_output=True, text=True, check=True
             ).stdout.strip()
@@ -162,9 +166,7 @@ def write_wg_conf(cfg: dict, private_key: str, desired: dict) -> None:
 
 
 def syncconf() -> None:
-    strip = subprocess.run(
-        ["wg-quick", "strip", WG_IFACE], capture_output=True, text=True, check=False
-    )
+    strip = subprocess.run(["wg-quick", "strip", WG_IFACE], capture_output=True, text=True, check=False)
     if strip.returncode != 0:
         log(f"wg-quick strip 실패: {strip.stderr.strip()}")
         return
@@ -179,12 +181,15 @@ def syncconf() -> None:
         log(f"wg syncconf 실패: {sync.stderr.strip()}")
 
 
-def collect_status() -> list[dict]:
-    dump = subprocess.run(
-        ["wg", "show", WG_IFACE, "dump"], capture_output=True, text=True, check=False
-    )
+def collect_status() -> list[dict] | None:
+    try:
+        dump = subprocess.run(["wg", "show", WG_IFACE, "dump"], capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        log("wg show failed; skipping status report")
+        return None
     if dump.returncode != 0:
-        return []
+        log("wg show failed; skipping status report")
+        return None
     peers = []
     for i, line in enumerate(dump.stdout.strip().splitlines()):
         if i == 0:
@@ -289,7 +294,9 @@ def cmd_register(cfg: dict) -> int:
     if start.returncode != 0:
         subprocess.run(["systemctl", "restart", "wg-quick@wg0"], check=True)
     status, _ = http_request(
-        cfg, cfg["register_url"], "POST",
+        cfg,
+        cfg["register_url"],
+        "POST",
         {"public_key": public, "listen_port_confirm": cfg["listen_port"]},
     )
     if status in (200, 204):
@@ -314,21 +321,70 @@ def cmd_reconcile(cfg: dict) -> int:
         apply_masquerade(desired.get("tunnel_cidr", cfg["tunnel_cidr"]), nat_networks)
     else:
         log("desired-state 조회 실패 — 이번 주기 스킵")
-    http_request(
-        cfg, cfg["status_url"], "POST",
-        {"peers": collect_status(), "reported_at": datetime.now(_UTC).isoformat(),
-         "agent_source": agent_source()},
-    )
     return 0
+
+
+def report_interval(cfg: dict) -> int:
+    interval = cfg.get("report_interval_seconds", 1)
+    if type(interval) is not int or not 1 <= interval <= 60:
+        raise ValueError("report_interval_seconds must be an integer from 1 to 60")
+    return interval
+
+
+def cmd_report(cfg: dict) -> int:
+    interval = report_interval(cfg)
+    peers = collect_status()
+    if peers is None:
+        return 1
+    status, _ = http_request(
+        cfg,
+        cfg["status_url"],
+        "POST",
+        {
+            "peers": peers,
+            "reported_at": datetime.now(_UTC).isoformat(),
+            "agent_source": agent_source(),
+            "report_interval_seconds": interval,
+        },
+    )
+    return 0 if status in (200, 204) else 1
+
+
+def cmd_run() -> int:
+    """Run serialized deadlines; slow network calls never create concurrent writers."""
+    next_reconcile = next_report = time.monotonic()
+    interval = 1
+    try:
+        while True:
+            if time.monotonic() >= next_reconcile:
+                try:
+                    cmd_reconcile(load_config())
+                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+                    log(f"reconcile failed ({type(exc).__name__})")
+                next_reconcile = time.monotonic() + 15
+
+            if time.monotonic() >= next_report:
+                try:
+                    cfg = load_config()
+                    interval = report_interval(cfg)
+                    cmd_report(cfg)
+                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+                    log(f"report failed ({type(exc).__name__})")
+                next_report = time.monotonic() + interval
+
+            time.sleep(max(0, min(next_reconcile, next_report) - time.monotonic()))
+    except KeyboardInterrupt:
+        return 0
 
 
 def main(argv=None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 1 or args[0] not in ("register", "reconcile"):
-        print("Usage: waygate_agent.py register | reconcile", file=sys.stderr)
+    if len(args) != 1 or args[0] not in ("register", "run"):
+        print("Usage: waygate_agent.py register | run", file=sys.stderr)
         return 2
-    cfg = load_config()
-    return cmd_register(cfg) if args[0] == "register" else cmd_reconcile(cfg)
+    if args[0] == "register":
+        return cmd_register(load_config())
+    return cmd_run()
 
 
 if __name__ == "__main__":

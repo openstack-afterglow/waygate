@@ -17,7 +17,7 @@ from waygate.models.schemas import WaygateAgentStatusReport
 _logger = logging.getLogger(__name__)
 
 _STATUS_PREFIX = "afterglow:waygate:status:"
-_STATUS_TTL = 300  # 5분 (reconcile 주기 15초 대비 충분한 여유)
+_STATUS_TTL = 300  # Five-minute observational cache; fresh traffic requires a newer report timestamp.
 
 
 async def _redis():

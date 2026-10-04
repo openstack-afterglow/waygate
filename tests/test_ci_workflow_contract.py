@@ -469,10 +469,15 @@ def _build_job(**options: object) -> dict:
             id="run-tojson-secrets",
         ),
         pytest.param({}, _upload_job(permissions={"statuses": "write", "pages": "write"}), True, id="statuses-write"),
-        pytest.param({"permissions": "write-all"}, {"runs-on": "ubuntu-latest", "steps": LINT_STEPS}, True, id="write-all"),
+        pytest.param(
+            {"permissions": "write-all"}, {"runs-on": "ubuntu-latest", "steps": LINT_STEPS}, True, id="write-all"
+        ),
         pytest.param({}, {"runs-on": "ubuntu-latest", "steps": LINT_STEPS}, True, id="inherited-permissions"),
         pytest.param(
-            {"permissions": READ_ONLY}, _build_job(**BUILD_WITH, outputs="type=image,push=true"), True, id="outputs-push"
+            {"permissions": READ_ONLY},
+            _build_job(**BUILD_WITH, outputs="type=image,push=true"),
+            True,
+            id="outputs-push",
         ),
         pytest.param(
             {"permissions": READ_ONLY},

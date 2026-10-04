@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import signal
 
 from waygate.config import get_settings, require_public_callback_base_url
 from waygate.db import close_db, init_db
+from waygate.observability import configure_logging
 from waygate.services.jobs import process_one_job
 
 _logger = logging.getLogger(__name__)
 
 
 async def serve() -> None:
+    configure_logging()
     settings = get_settings()
     require_public_callback_base_url(settings)
     if not settings.database_url:
@@ -25,22 +27,39 @@ async def serve() -> None:
         connect_timeout=settings.database_connect_timeout,
         pool_timeout=settings.database_pool_timeout,
     )
+    _logger.info("worker stage=ready status=started")
     try:
         while True:
             try:
                 processed = await process_one_job()
-            except Exception:
-                _logger.exception("Waygate worker iteration failed")
+            except Exception as exc:
+                _logger.error("worker stage=poll status=failed error_type=%s", type(exc).__name__)
                 processed = False
             if not processed:
                 await asyncio.sleep(0.5)
     finally:
         await close_db()
+        _logger.info("worker stage=shutdown status=stopped")
+
+
+async def _main_async() -> None:
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(serve())
+    for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(shutdown_signal, task.cancel)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(shutdown_signal)
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    asyncio.run(serve())
+    logging.basicConfig(level=logging.INFO)
+    configure_logging()
+    asyncio.run(_main_async())
 
 
 if __name__ == "__main__":

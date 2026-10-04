@@ -10,7 +10,7 @@ import ipaddress
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 WaygateServerStatus = Literal["CREATING", "PROVISIONING", "ACTIVE", "DELETING", "DELETED", "ERROR"]
 WaygateNatMode = Literal["snat"]
@@ -68,6 +68,15 @@ class WaygateServerCreateRequest(BaseModel):
     """Waygate 서버 생성 요청."""
 
     name: str = Field(default="")
+    dns: str | None = None
+    persistent_keepalive: int = Field(default=25, ge=0, le=65535, strict=True)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("dns")
+    @classmethod
+    def validate_dns(cls, v: str | None) -> str | None:
+        return WaygateClientCreateRequest.validate_dns(v)
 
     @field_validator("name")
     @classmethod
@@ -78,6 +87,27 @@ class WaygateServerCreateRequest(BaseModel):
             return f"waygate-{uuid.uuid4().hex[:8]}"
         if not _NAME_RE.match(v):
             raise ValueError("이름은 영문/숫자로 시작하고, 영문·숫자·하이픈·언더스코어만 허용됩니다 (최대 63자)")
+        return v
+
+
+class WaygateServerUpdateRequest(BaseModel):
+    """Patch DNS and keepalive defaults used by inheriting clients."""
+
+    dns: str | None = None
+    persistent_keepalive: int | None = Field(default=None, ge=0, le=65535, strict=True)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("dns")
+    @classmethod
+    def validate_dns(cls, v: str | None) -> str | None:
+        return WaygateClientCreateRequest.validate_dns(v)
+
+    @field_validator("persistent_keepalive")
+    @classmethod
+    def reject_null(cls, v: int | None) -> int:
+        if v is None:
+            raise ValueError("null을 사용할 수 없습니다")
         return v
 
 
@@ -94,7 +124,7 @@ class WaygateServerInfo(BaseModel):
     listen_port: int
     tunnel_cidr: str
     dns: str | None = None
-    mtu: int | None = None
+    persistent_keepalive: int = 25
     server_public_key: str | None = None
     agent_install_mode: str = "cloud-init"
     agent_source: str | None = None
@@ -105,6 +135,24 @@ class WaygateServerInfo(BaseModel):
     # Redis 최신 상태 병합 (에이전트가 마지막으로 보고한 시각/피어 수)
     last_status_reported_at: str | None = None
     peer_count: int | None = None
+    report_interval_seconds: int | None = None
+
+
+def _validate_inheritance_fields(body: BaseModel) -> None:
+    for value_field, flag_field in (
+        ("dns", "inherit_dns"),
+        ("persistent_keepalive", "inherit_persistent_keepalive"),
+    ):
+        supplied = value_field in body.model_fields_set
+        if flag_field not in body.model_fields_set:
+            continue
+        inherit = getattr(body, flag_field)
+        if inherit is None:
+            raise ValueError(f"{flag_field} cannot be null")
+        if inherit and supplied:
+            raise ValueError(f"{value_field} cannot accompany {flag_field}=true")
+        if not inherit and not supplied:
+            raise ValueError(f"{value_field} is required with {flag_field}=false")
 
 
 class WaygateClientCreateRequest(BaseModel):
@@ -114,9 +162,24 @@ class WaygateClientCreateRequest(BaseModel):
     allowed_ips: list[str] | None = Field(default=None, max_length=20)
     dns: str | None = None
     mtu: int | None = Field(default=None, ge=576, le=9000, strict=True)
-    persistent_keepalive: int = Field(default=25, ge=0, le=65535, strict=True)
+    persistent_keepalive: int | None = Field(default=None, ge=0, le=65535, strict=True)
+    inherit_dns: bool | None = Field(default=None, strict=True)
+    inherit_persistent_keepalive: bool | None = Field(default=None, strict=True)
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_inheritance(self):
+        _validate_inheritance_fields(self)
+        return self
+
+    @field_validator("persistent_keepalive")
+    @classmethod
+    def reject_null_keepalive(cls, v: int | None) -> int:
+        if v is None:
+            raise ValueError("null을 사용할 수 없습니다")
+        return v
+
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
@@ -160,13 +223,20 @@ class WaygateClientCreateRequest(BaseModel):
 
 
 class WaygateClientUpdateRequest(BaseModel):
-    """VPN 클라이언트 수정 요청. 생략된 값은 유지하고 dns/mtu 의 null은 초기화한다."""
+    """VPN 클라이언트 수정 요청. 생략된 값은 유지하고 명시한 값은 override 한다."""
 
     name: str | None = None
     enabled: bool | None = None
     dns: str | None = None
     mtu: int | None = Field(default=None, ge=576, le=9000, strict=True)
     persistent_keepalive: int | None = Field(default=None, ge=0, le=65535, strict=True)
+    inherit_dns: bool | None = Field(default=None, strict=True)
+    inherit_persistent_keepalive: bool | None = Field(default=None, strict=True)
+
+    @model_validator(mode="after")
+    def validate_inheritance(self):
+        _validate_inheritance_fields(self)
+        return self
 
     model_config = {"extra": "forbid"}
 
@@ -204,6 +274,8 @@ class WaygateClientInfo(BaseModel):
     dns: str | None = None
     mtu: int | None = None
     persistent_keepalive: int = 25
+    inherit_dns: bool = False
+    inherit_persistent_keepalive: bool = False
     psk_enabled: bool = False
     created_at: str | None = None
     updated_at: str | None = None
@@ -213,6 +285,7 @@ class WaygateClientInfo(BaseModel):
     last_reported_at: str | None = None
     rx_bytes: int | None = None
     tx_bytes: int | None = None
+    report_interval_seconds: int | None = None
 
 
 class WaygateClientCreateResponse(WaygateClientInfo):
@@ -339,6 +412,7 @@ class WaygateAgentStatusReport(BaseModel):
     peers: list[WaygateAgentPeerState] = Field(default_factory=list, max_length=1000)
     reported_at: str | None = None
     agent_source: Literal["cloud-init", "prebuilt"] | None = None
+    report_interval_seconds: int | None = Field(default=None, ge=1, le=60, strict=True)
 
 
 class WaygateAgentDesiredStatePeer(BaseModel):

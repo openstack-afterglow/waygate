@@ -9,6 +9,7 @@ request.state.token_info 가 설정되지 않아 activity_audit_middleware 는 �
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from slowapi.util import get_remote_address
 
 from waygate.models.schemas import WaygateAgentDesiredState, WaygateAgentRegisterRequest, WaygateAgentStatusReport
 from waygate.rate_limit import limiter
@@ -116,8 +117,15 @@ async def get_desired_state(request: Request, server_id: str):
     )
 
 
+def _status_agent_key(request: Request) -> str:
+    # Keep separate gateway budgets behind NAT without allowing guessed IDs to
+    # bypass the independent IP ceiling. Authentication remains server-bound.
+    return f"{get_remote_address(request)}:{request.path_params['server_id']}"
+
+
 @router.post("/{server_id}/agent/status", status_code=204)
-@limiter.limit("60/minute")
+@limiter.shared_limit("1200/minute", scope="waygate-agent-status-ip")
+@limiter.limit("120/minute", key_func=_status_agent_key)
 async def report_waygate_status(
     request: Request,
     server_id: str,

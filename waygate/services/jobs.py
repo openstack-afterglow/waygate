@@ -129,6 +129,20 @@ async def enqueue_delete_job(
 
 async def _mark_server_failed(session, job: WaygateJob, error: str) -> None:
     server = await session.get(WaygateServer, job.server_id, with_for_update=True)
+    if job.kind == "provision":
+        deleting = (
+            await session.execute(
+                select(WaygateJob.id)
+                .where(
+                    WaygateJob.server_id == job.server_id,
+                    WaygateJob.kind == "delete",
+                    WaygateJob.status.in_(("queued", "running")),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if deleting is not None:
+            return
     if server is not None and server.deleted_at is None:
         server.status = "ERROR"
         server.status_reason = error
@@ -192,6 +206,42 @@ async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None]
             ).scalar_one_or_none()
             if active_other is not None:
                 return None
+            # Cloud cleanup may have committed before a worker died recording
+            # job completion. Reconcile that tombstone before the retry limit.
+            if server.deleted_at is not None:
+                completed = job.kind == "delete" and server.status == "DELETED"
+                job.status = "completed" if completed else "failed"
+                job.last_error = None if completed else "Waygate server is already deleted"
+                job.claimed_at = None
+                job.updated_at = now
+                continue
+            if job.kind == "provision":
+                deleting = (
+                    await session.execute(
+                        select(WaygateJob.id)
+                        .where(
+                            WaygateJob.server_id == job.server_id,
+                            WaygateJob.kind == "delete",
+                            WaygateJob.status.in_(("queued", "running")),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if deleting is not None:
+                    job.status = "failed"
+                    job.last_error = "Waygate provisioning superseded by deletion"
+                    job.claimed_at = None
+                    job.updated_at = now
+                    continue
+                # The provisioner's final write records a usable VM endpoint.
+                # Losing the job-completion write must not create another VM
+                # or replace the bearer of the already provisioned gateway.
+                if server.status in {"PROVISIONING", "ACTIVE"} and server.server_vm_id and server.endpoint_ip:
+                    job.status = "completed"
+                    job.last_error = None
+                    job.claimed_at = None
+                    job.updated_at = now
+                    continue
             if job.attempts >= _MAX_ATTEMPTS:
                 error = job.last_error or "Waygate job retry limit exceeded"
                 job.status = "failed"
@@ -253,13 +303,18 @@ async def _retry_or_fail(job_id: str, *, attempt: int, error: str) -> bool:
 async def process_one_job() -> bool:
     """Claim and process at most one durable Waygate job."""
     claimed = await _claim_one()
+    if _logger.isEnabledFor(logging.DEBUG):
+        _logger.debug("job query=claim result=%s", "none" if claimed is None else "found")
     if claimed is None:
         return False
     job_id, attempt, kind, project_id, server_id, user_id, username = claimed
+    _logger.info("job stage=claimed kind=%s attempt=%d status=running", kind, attempt)
     try:
         if kind == "provision":
             if attempt > 1:
-                await waygate_db.update_server_status(server_id, "CREATING", "프로비저닝 재시도 중")
+                await waygate_db.update_server_status(
+                    server_id, "CREATING", "프로비저닝 재시도 중", only_if_status="ERROR"
+                )
             await provision_waygate_server(project_id, server_id, user_id or "", username or "")
             server = await waygate_db.get_server_by_id(server_id)
             if server is None:
@@ -275,8 +330,25 @@ async def process_one_job() -> bool:
                 raise RuntimeError(f"Waygate server deletion did not reach terminal state: {state}")
         else:
             raise RuntimeError(f"unsupported Waygate job kind: {kind}")
-        await _complete(job_id, attempt=attempt)
     except Exception as exc:
-        _logger.exception("Waygate job failed job_id=%s kind=%s attempt=%d", job_id, kind, attempt)
-        await _retry_or_fail(job_id, attempt=attempt, error=str(exc))
+        retried = await _retry_or_fail(job_id, attempt=attempt, error=str(exc))
+        _logger.info(
+            "job stage=finish kind=%s attempt=%d status=%s error_type=%s",
+            kind,
+            attempt,
+            ("failed" if attempt >= _MAX_ATTEMPTS else "queued") if retried else "lease_lost",
+            type(exc).__name__,
+        )
+    else:
+        # A failed completion write is not a failed cloud operation. Leave the
+        # lease intact so a later claim can reconcile a committed tombstone.
+        completed = await _complete(job_id, attempt=attempt)
+        _logger.info(
+            "job stage=finish kind=%s attempt=%d status=%s",
+            kind,
+            attempt,
+            "completed" if completed else "lease_lost",
+        )
+    if _logger.isEnabledFor(logging.DEBUG):
+        _logger.debug("job query=transition result=recorded kind=%s", kind)
     return True

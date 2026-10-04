@@ -1,7 +1,7 @@
 ---
 # Waygate kolla role defaults
 
-waygate_image_tag: "0.2.0"
+waygate_image_tag: "0.3.0"
 waygate_image_namespace: "ghcr.io/openstack-afterglow"
 waygate_api_image: "{{ waygate_image_namespace }}/waygate-api"
 waygate_worker_image: "{{ waygate_image_namespace }}/waygate-worker"
@@ -58,6 +58,7 @@ waygate_key_name: ""
 
 waygate_encryption_key: "{{ afterglow_kubeconfig_encryption_key | default('') }}"
 waygate_trusted_proxies: "127.0.0.1/32,::1/128"
+waygate_log_level: "INFO" # Set DEBUG only for bounded Waygate metadata; never logs SQL values.
 
 waygate_services:
   waygate-api:
@@ -66,7 +67,7 @@ waygate_services:
     enabled: "{{ enable_waygate_api | bool }}"
     image: "{{ waygate_api_image_ref }}"
     network_mode: host
-    command: ["uvicorn", "waygate.main:app", "--host", "{{ waygate_api_listen_address }}", "--port", "{{ waygate_api_listen_port | string }}"]
+    command: ["uvicorn", "waygate.main:app", "--host", "{{ waygate_api_listen_address }}", "--port", "{{ waygate_api_listen_port | string }}", "--no-access-log"]
     restart_policy: unless-stopped
     volumes:
       - "/etc/kolla/waygate/waygate.conf:/app/waygate.conf:ro"
@@ -76,6 +77,7 @@ waygate_services:
       REDIS_URL: "{{ waygate_redis_url }}"
       OS_PASSWORD: "{{ waygate_keystone_password }}"
       WAYGATE_ENCRYPTION_KEY: "{{ waygate_encryption_key }}"
+      LOG_LEVEL: "{{ waygate_log_level }}"
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; response = urlopen('http://{{ waygate_api_listen_address }}:{{ waygate_api_listen_port }}/v1/health', timeout=5); assert response.status == 200"]
       interval: 30s
@@ -111,6 +113,7 @@ waygate_services:
       REDIS_URL: "{{ waygate_redis_url }}"
       OS_PASSWORD: "{{ waygate_keystone_password }}"
       WAYGATE_ENCRYPTION_KEY: "{{ waygate_encryption_key }}"
+      LOG_LEVEL: "{{ waygate_log_level }}"
 
 waygate_public_haproxy_services:
   waygate-public:

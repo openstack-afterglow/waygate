@@ -24,4 +24,4 @@ runcmd:
   - sysctl --system
   - /usr/bin/python3 /opt/afterglow/waygate_agent.py register
   - systemctl daemon-reload
-  - systemctl enable --now afterglow-waygate-reconcile.timer
+  - systemctl enable --now afterglow-waygate-reconcile.service

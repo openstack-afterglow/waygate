@@ -130,7 +130,6 @@ class TestClientDnsInjection:
         req = WaygateClientCreateRequest(name="valid-name", dns="dns.example.com")
         assert req.dns == "dns.example.com"
 
-
     def test_none_dns_accepted(self):
         req = WaygateClientCreateRequest(name="valid-name", dns=None)
         assert req.dns is None
@@ -146,6 +145,7 @@ class TestClientUpdateNameInjection:
     def test_malicious_name_rejected(self, malicious):
         with pytest.raises(ValidationError):
             WaygateClientUpdateRequest(name=malicious)
+
 
 # ---------------------------------------------------------------------------
 # VpnServerCreateRequest.name
@@ -237,6 +237,7 @@ class TestCloudInitRenderQuoting:
             "listen_port": 51820,
             "tunnel_cidr": "10.8.0.0/24",
             "tunnel_address": "10.8.0.1/24",
+            "report_interval_seconds": 1,
             "agent_install_mode": "cloud-init",
         }
         self._assert_no_template_markers(document)
@@ -290,6 +291,8 @@ class TestCloudInitRenderQuoting:
 
     def test_valid_inputs_render_successfully(self):
         """정상 입력은 예외 없이 렌더되고 base64 로 인코딩된다."""
-        yaml_str = self._decode(waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"server_name": "waygate-prod-01"})))
+        yaml_str = self._decode(
+            waygate_config.render_agent_userdata(**(_VALID_USERDATA | {"server_name": "waygate-prod-01"}))
+        )
         assert "waygate-prod-01" in yaml_str
         assert "wg-quick@wg0" in yaml_str

@@ -9,8 +9,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from waygate.auth import require_token
 from waygate.config import get_settings
 from waygate.db import is_db_available
-from waygate.models.schemas import WaygateServerCreateRequest, WaygateServerDeleteResponse, WaygateServerInfo
+from waygate.models.schemas import (
+    WaygateServerCreateRequest,
+    WaygateServerDeleteResponse,
+    WaygateServerInfo,
+    WaygateServerUpdateRequest,
+)
 from waygate.services import waygate_agent_auth, waygate_db, waygate_jobs
+from waygate.services.store import WaygateServerInactiveError
 
 router = APIRouter()
 _logger = logging.getLogger(__name__)
@@ -29,6 +35,7 @@ async def _merge_status(server: dict) -> WaygateServerInfo:
         info.last_status_reported_at = status_result.get("_stored_at")
         info.peer_count = len(status_result.get("peers", []))
         info.agent_source = status_result.get("agent_source")
+        info.report_interval_seconds = status_result.get("report_interval_seconds")
     return info
 
 
@@ -69,6 +76,8 @@ async def create_waygate_server(
             "status": "CREATING",
             "listen_port": settings.waygate_default_listen_port,
             "tunnel_cidr": settings.waygate_default_tunnel_cidr,
+            "dns": body.dns,
+            "persistent_keepalive": body.persistent_keepalive,
             "flavor_id": snapshot["waygate.flavor"]["id"],
             "image_id": snapshot["waygate.image"]["id"],
             "provider_network_id": snapshot["waygate.provider_network"]["id"],
@@ -102,6 +111,24 @@ async def get_waygate_server(server_id: str, token_info: dict = Depends(require_
     server = await waygate_db.get_server(project_id, server_id)
     if not server:
         # 정보 노출 방지 — 존재하지 않음/타 프로젝트 소유 모두 동일 404
+        raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
+    return await _merge_status(server)
+
+
+@router.patch("/{server_id}", response_model=WaygateServerInfo)
+async def update_waygate_server(
+    server_id: str,
+    body: WaygateServerUpdateRequest,
+    token_info: dict = Depends(require_token),
+):
+    _require_db()
+    try:
+        server = await waygate_db.update_server_defaults(
+            token_info["project_id"], server_id, body.model_dump(exclude_unset=True)
+        )
+    except WaygateServerInactiveError as exc:
+        raise HTTPException(status_code=409, detail="Waygate 서버가 ACTIVE 상태가 아닙니다") from exc
+    if server is None:
         raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
     return await _merge_status(server)
 

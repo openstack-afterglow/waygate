@@ -280,10 +280,20 @@ class TestAgentDesiredStateHappyPath:
         token = await waygate_agent_auth.issue_report_token("server-1")
         psk = waygate_keys.generate_preshared_key()
         clients = [
-            {"id": "new", "public_key": "A" * 43 + "=", "preshared_key_encrypted":
-             k3s_crypto.encrypt_wg_client_key(psk), "tunnel_ip": "10.8.0.2", "enabled": True},
-            {"id": "legacy", "public_key": "B" * 43 + "=", "preshared_key_encrypted": None,
-             "tunnel_ip": "10.8.0.3", "enabled": True},
+            {
+                "id": "new",
+                "public_key": "A" * 43 + "=",
+                "preshared_key_encrypted": k3s_crypto.encrypt_wg_client_key(psk),
+                "tunnel_ip": "10.8.0.2",
+                "enabled": True,
+            },
+            {
+                "id": "legacy",
+                "public_key": "B" * 43 + "=",
+                "preshared_key_encrypted": None,
+                "tunnel_ip": "10.8.0.3",
+                "enabled": True,
+            },
         ]
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(
@@ -301,10 +311,20 @@ class TestAgentDesiredStateHappyPath:
     async def test_desired_state_drops_peer_when_stored_psk_cannot_be_decrypted(self, api_client):
         token = await waygate_agent_auth.issue_report_token("server-1")
         clients = [
-            {"id": "corrupt", "public_key": "A" * 43 + "=", "preshared_key_encrypted": "invalid",
-             "tunnel_ip": "10.8.0.2", "enabled": True},
-            {"id": "legacy", "public_key": "B" * 43 + "=", "preshared_key_encrypted": None,
-             "tunnel_ip": "10.8.0.3", "enabled": True},
+            {
+                "id": "corrupt",
+                "public_key": "A" * 43 + "=",
+                "preshared_key_encrypted": "invalid",
+                "tunnel_ip": "10.8.0.2",
+                "enabled": True,
+            },
+            {
+                "id": "legacy",
+                "public_key": "B" * 43 + "=",
+                "preshared_key_encrypted": None,
+                "tunnel_ip": "10.8.0.3",
+                "enabled": True,
+            },
         ]
         with patch("waygate.api.agent.waygate_db") as mock_db:
             mock_db.get_server_by_id = AsyncMock(
@@ -345,6 +365,24 @@ class TestAgentStatusHappyPath:
         assert stored["agent_source"] == "prebuilt"
 
     @pytest.mark.asyncio
+    async def test_status_report_rejects_invalid_sampling_cadence(self, api_client):
+        token = await waygate_agent_auth.issue_report_token("server-1")
+        for cadence in (0, 61, True, "1", 1.5):
+            response = await api_client.post(
+                "/v1/servers/server-1/agent/status",
+                json={"peers": [], "report_interval_seconds": cadence},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 422
+        response = await api_client.post(
+            "/v1/servers/server-1/agent/status",
+            json={"peers": [], "report_interval_seconds": 3},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 204
+        assert (await waygate_agent_auth.get_status_result("server-1"))["report_interval_seconds"] == 3
+
+    @pytest.mark.asyncio
     async def test_status_report_rejects_invalid_public_key(self, api_client):
         token = await waygate_agent_auth.issue_report_token("server-1")
         resp = await api_client.post(
@@ -354,12 +392,50 @@ class TestAgentStatusHappyPath:
         )
         assert resp.status_code == 422
 
+    @pytest.mark.asyncio
+    async def test_status_budget_is_per_gateway_behind_shared_ip(self, api_client):
+        tokens = {server: await waygate_agent_auth.issue_report_token(server) for server in ("server-1", "server-A")}
+        for _ in range(65):
+            for server, token in tokens.items():
+                response = await api_client.post(
+                    f"/v1/servers/{server}/agent/status",
+                    json={"peers": []},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status_code == 204
+
+        for _ in range(55):
+            response = await api_client.post(
+                "/v1/servers/server-1/agent/status",
+                json={"peers": []},
+                headers={"Authorization": f"Bearer {tokens['server-1']}"},
+            )
+            assert response.status_code == 204
+        response = await api_client.post(
+            "/v1/servers/server-1/agent/status",
+            json={"peers": []},
+            headers={"Authorization": f"Bearer {tokens['server-1']}"},
+        )
+        assert response.status_code == 429
+        response = await api_client.post(
+            "/v1/servers/server-A/agent/status",
+            json={"peers": []},
+            headers={"Authorization": f"Bearer {tokens['server-A']}"},
+        )
+        assert response.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_guessed_server_ids_cannot_bypass_shared_ip_ceiling(self, api_client):
+        for index in range(1200):
+            response = await api_client.post(f"/v1/servers/guessed-{index}/agent/status", json={"peers": []})
+            assert response.status_code == 401
+        response = await api_client.post("/v1/servers/another-guess/agent/status", json={"peers": []})
+        assert response.status_code == 429
+
 
 # ---------------------------------------------------------------------------
 # Durable token transitions, cache isolation, and delayed authentication races.
 # ---------------------------------------------------------------------------
-
-
 
 
 @pytest.fixture(autouse=True)
@@ -367,11 +443,13 @@ def agent_token_store(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all([
-            WaygateServer(id="server-1", project_id="test-project-123", name="gateway"),
-            WaygateServer(id="server-A", project_id="test-project-123", name="other-gateway"),
-            WaygateServer(id="srv-rotation", project_id="proj-rotation", name="rotation-gateway"),
-        ])
+        session.add_all(
+            [
+                WaygateServer(id="server-1", project_id="test-project-123", name="gateway"),
+                WaygateServer(id="server-A", project_id="test-project-123", name="other-gateway"),
+                WaygateServer(id="srv-rotation", project_id="proj-rotation", name="rotation-gateway"),
+            ]
+        )
         session.commit()
 
     @asynccontextmanager
@@ -396,7 +474,8 @@ class TestAgentTokenRotation:
         pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
         assert pending is not None and pending != old
         assert await waygate_agent_auth.verify_report_token("srv-rotation", old) == {
-            "server_id": "srv-rotation", "project_id": "proj-rotation"
+            "server_id": "srv-rotation",
+            "project_id": "proj-rotation",
         }
         assert await waygate_agent_auth.verify_report_token("another-server", pending) is None
         assert await waygate_agent_auth.verify_report_token("srv-rotation", "wrong-token") is None
@@ -410,7 +489,8 @@ class TestAgentTokenRotation:
         pending = await waygate_agent_auth.get_pending_next_token("srv-rotation")
         redis = await waygate_agent_auth._redis()
         await redis.setex(
-            "afterglow:waygate:srvtoken:srv-rotation", 604800,
+            "afterglow:waygate:srvtoken:srv-rotation",
+            604800,
             json.dumps({"token": old, "next_token": pending, "project_id": "proj-rotation"}),
         )
         with patch.object(redis, "setex", AsyncMock(side_effect=ConnectionError("Redis unavailable"))):

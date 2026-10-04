@@ -36,7 +36,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 USER appuser
 
 FROM waygate-runtime AS waygate-api
-CMD ["uvicorn", "waygate.main:app", "--host", "0.0.0.0", "--port", "8010"]
+CMD ["uvicorn", "waygate.main:app", "--host", "0.0.0.0", "--port", "8010", "--no-access-log"]
 
 FROM waygate-runtime AS waygate-worker
 CMD ["python", "-m", "waygate.worker"]
