@@ -66,12 +66,12 @@ Agent 인증은 server-bound bearer와 DB 정본을 timing-safe 검증하고 DB 
 
 ### Requirement: Migrations and operator trust are explicit
 
-적용된 migration identity/checksum을 바꾸지 않고 additive migration과 manifest를 함께 유지해야 한다(SHALL). Published 0.2.0은 001–003을 포함한다. Candidate 0.3.0 프로세스 전에 001–004 schema를 준비하고 004의 false 상속 flags로 기존 client override와 key를 보존한다. Existing isolated/production DB의 004 ledger가 다르면 SQL을 덮어쓰거나 ledger를 재작성하지 말고 additive 후속 migration을 준비한다. Kolla migration은 `deploy --tags waygate` bootstrap에서 실행되며 `reconfigure`는 대체 경로가 아니다. DB와 이전 image/config를 먼저 백업한다.
+적용된 migration identity/checksum을 바꾸지 않고 additive migration과 manifest를 함께 유지해야 한다(SHALL). Published 0.2.0은 001–003을 포함한다. Candidate 0.3.1은 0.3.0의 schema 요구를 유지한다: 새 프로세스 전에 001–004 schema를 준비하고 004의 false 상속 flags로 기존 client override와 key를 보존한다. Existing isolated/production DB의 004 ledger가 다르면 SQL을 덮어쓰거나 ledger를 재작성하지 말고 additive 후속 migration을 준비한다. Kolla migration은 `deploy --tags waygate` bootstrap에서 실행되며 `reconfigure`는 대체 경로가 아니다. DB와 이전 image/config를 먼저 백업한다.
 
 Callback은 gateway VM에서 도달 가능한 명시적 public HTTP(S) endpoint여야 하며 missing/loopback을 내부 주소로 대체하지 않는다. 서비스 계정은 각 요청 project에서 provisioning 권한을 가져야 한다. zero-root-disk flavor는 cloud의 Nova admin 정책을 확인한다. Trusted proxy는 실제 proxy IP/CIDR만 허용하며 `*` 또는 tenant network 전체를 신뢰하지 않는다. HAProxy는 입력 `X-Forwarded-Proto`를 버리고 TLS 연결에서 설정한다. Native build TLS 검증은 유지하고 private CA는 `OS_CACERT`로 제공한다.
 
 #### Scenario: Operator reconfigures an old schema
-- **WHEN** 0.3.0 rollout에서 reconfigure만 실행하려 한다
+- **WHEN** 0.3.1 rollout에서 reconfigure만 실행하려 한다
 - **THEN** 이를 migration 완료로 간주하지 않고 backup과 deploy/bootstrap으로 004 적용을 확인한 뒤 새 프로세스를 시작한다.
 
 ### Requirement: Image, release and production authorization are separate
@@ -80,11 +80,15 @@ Callback은 gateway VM에서 도달 가능한 명시적 public HTTP(S) endpoint�
 
 운영 rollout은 별도 명시적 승인을 받고 published image digest·source commit·wheel checksum·이전 config/DB backup을 보존해야 한다(SHALL). source-build role의 기존 immutable pin이 release source와 같다고 가정하지 않는다. Afterglow operator role은 release-tag 승격 후 설치한다. 배포 후 opt-in lifecycle과 client inheritance/override, cadence, PSK, data-plane 검증을 별도로 관찰한다.
 
-Prebuilt 이미지는 public/community visibility와 `waygate_agent=prebuilt`, version/source hash가 필요하다. shared installer로 build하고 snapshot에는 bearer/private key/per-server config/상속 SSH authorized keys를 남기지 않는다. 기존 timer-based 이미지/VM을 0.3.0 single-run agent로 자동 승격하지 않는다. 새 gateway는 새로 build·boot 검증한 이미지를 사용한다. 기존 VM agent migration은 별도 승인을 받으며 timer 옆에 incompatible service를 켜거나 old image를 덮어쓰지 않는다. Gateway build는 Ubuntu 24.04 amd64만 지원하고 provisioner가 다른 architecture를 거부한다. CI image publish는 hosted default linux/amd64이며 별도 arm64 publication 검증 없이 arm64 tag 지원을 주장하지 않는다. Native Nova/Glance build는 billable operator action이며 QCOW2 upload 대상이 아니다. interrupted build는 잔여 VM/keypair/FIP를 확인한다.
+Prebuilt 이미지는 public/community visibility와 `waygate_agent=prebuilt`, version/source hash가 필요하다. shared installer로 build하고 snapshot에는 bearer/private key/per-server config/상속 SSH authorized keys를 남기지 않는다. 기존 timer-based 이미지/VM을 0.3.0에서 도입한 single-run agent로 자동 승격하지 않으며 0.3.1 metadata patch도 agent migration이 아니다. 새 gateway는 새로 build·boot 검증한 이미지를 사용한다. 기존 VM agent migration은 별도 승인을 받으며 timer 옆에 incompatible service를 켜거나 old image를 덮어쓰지 않는다. Gateway build는 Ubuntu 24.04 amd64만 지원하고 provisioner가 다른 architecture를 거부한다. CI image publish는 hosted default linux/amd64이며 별도 arm64 publication 검증 없이 arm64 tag 지원을 주장하지 않는다. October 2 로컬 amd64/arm64 증거는 historical이며 CI의 multiarch 발행 증거가 아니다. Native Nova/Glance build는 billable operator action이며 QCOW2 upload 대상이 아니다. interrupted build는 잔여 VM/keypair/FIP를 확인한다.
 
 #### Scenario: Candidate metadata exists without published artifacts
-- **WHEN** source version과 Kolla registry default가 candidate 0.3.0이다
-- **THEN** 이를 publication이나 production deployment 증거로 쓰지 않고 owner main integration·tag/image gate·수동 wheel asset·승인된 운영 rollout을 각각 확인한다. main-target PR 생성/수정과 merge는 pie_root에게만 예약하며 session은 local proposed PR body만 준비한다.
+- **WHEN** source distribution version과 Kolla registry default가 candidate 0.3.1이며 independent SDK는 0.2.0이다
+- **THEN** 이를 publication이나 production deployment 증거로 쓰지 않고 정확한 owner-approved integrated release commit·tag/image gate·수동 wheel asset·승인된 운영 rollout을 각각 확인한다. Main `cf72df3`는 이미 `a6e7dfd`와 같은 baseline tree를 통합했으므로 이 source integration을 pending으로 기록하지 않는다. 미래 0.3.1 integrated release commit과 publication에는 별도 owner 승인이 필요하다. main-target PR 생성/수정과 merge는 pie_root에게만 예약하며 session은 local proposed PR body만 준비한다.
+
+Current service 0.3.1 is a metadata-only root patch atop `a6e7dfd3f5f4745fcf6c9e059a0e4e9b66531e55`, not new functionality; SDK 0.2.0, dependency selections, migration 004, immutable source-build pin and old prebuilt references remain retained. Remote `v0.3.1` is absent. [Later manual wheel/publication examples](../../../RELEASE_NOTES.md#maintainer-gates-and-manual-publication) use 0.3.1 and are not executed here. The October 2 0.3.0 runtime/gate receipts below are historical, not fresh 0.3.1 verification; the parent records current exact receipts separately after execution.
+
+Existing [Docker metadata policy](../../../.github/workflows/docker-build.yml) emits semver `0.3.1` on `v0.3.1`, raw `dev` on dev and explicit raw `latest` on main, plus SHA tags. No `flavor` override disables metadata-action v5's default [`latest=auto`](https://github.com/docker/metadata-action/tree/v5#latest-tag), so a stable semver tag also generates `latest`; latest is not main-only. Service/SDK CI still gates publication, PR builds push nothing, and CI images remain linux/amd64 only. No workflow or publication policy is changed by this documentation preparation.
 
 ## Framework remediation handoff
 

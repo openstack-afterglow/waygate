@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased — service 0.3.0 / SDK 0.2.0 candidate
+## Unreleased — service 0.3.1 / SDK 0.2.0 candidate
+
+### Changed
+
+- Metadata-only root service patch atop `a6e7dfd3f5f4745fcf6c9e059a0e4e9b66531e55`; no new features, dependency changes or SDK bump. All 0.3.0 functionality, framework/signal fixes, migration 004, source-build pin, old prebuilt references and operator prerequisites remain retained.
+- Main `cf72df3` already integrates the same baseline tree. Any future integrated 0.3.1 release commit, tag/image publication, manual wheel/GitHub Release and production rollout require owner authorization; remote `v0.3.1` is absent. Later manual publication examples use 0.3.1 and have not been executed here.
+
+### Fixed
+
+- Isolate the installed-agent test's one-cycle shutdown clock stub to the agent namespace. Mutating the shared `time.sleep` also interrupted Python's timed `wg show` subprocess wait, causing an intermittent missing status POST; HTTP, installed assets and all payload assertions remain unchanged. Runtime agent code is unchanged.
+
+### Verification status
+
+No new checks are claimed by this documentation preparation. The October 2 receipts below apply to historical service 0.3.0 / SDK 0.2.0 source, not fresh 0.3.1 verification. Current exact runtime/gate receipts are recorded separately by the parent after execution.
+
+## Historical service 0.3.0 / SDK 0.2.0 candidate — 2026-10-02
 
 ### Changed
 
@@ -14,6 +29,6 @@
 
 ### Verification status
 
-Current framework and signal changes were exercised through canonical isolated API/worker images on aarch64/x86_64 with real MariaDB/Redis and an HTTP Keystone fixture. Real public SDK Connection, ownership/auth, JSON/+json/null/zero, malformed Host/path normalization, safe INFO/DEBUG logs, status budgets120/1200 and process SIGTERM exit0 passed. Missing/wrong Content-Type returns422; current shared agent, immutable-v0.1.4 cloud-init template and Afterglow JSON transports provide/preserve application/json. The running production prebuilt agent was not inspected. Final serial and four-worker suites each passed471 with1 opt-in live skip, SDK44 and root/SDK Ruff passed; architecture guards passed. No genuine cloud lifecycle, provider, publication, production rollout or default-branch alert closure is claimed.
+Historical October 2 framework and signal changes were exercised through canonical isolated API/worker images on aarch64/x86_64 with real MariaDB/Redis and an HTTP Keystone fixture. Real public SDK Connection, ownership/auth, JSON/+json/null/zero, malformed Host/path normalization, safe INFO/DEBUG logs, status budgets120/1200 and process SIGTERM exit0 passed. Missing/wrong Content-Type returns422; the then-current shared agent, immutable-v0.1.4 cloud-init template and Afterglow JSON transports provide/preserve application/json. The running production prebuilt agent was not inspected. Final serial and four-worker suites each passed471 with1 opt-in live skip, SDK44 and root/SDK Ruff passed; architecture guards passed. No genuine cloud lifecycle, provider, publication, production rollout or default-branch alert closure is claimed.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete current candidate changes, maintainer gates and immutable historical release records.
