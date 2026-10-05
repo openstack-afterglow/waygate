@@ -495,7 +495,7 @@ def test_installed_agent_runs_both_jobs_in_both_image_modes(report_runtime, tmp_
         [
             sys.executable,
             "-c",
-            "import runpy, sys; from pathlib import Path; "
+            "import runpy, sys; from pathlib import Path; from types import SimpleNamespace; "
             "root = Path(sys.argv[1]); ns = runpy.run_path(str(root / sys.argv[2].lstrip('/'))); "
             "g = ns['main'].__globals__; "
             "g.update(CONFIG_PATH=str(root / 'etc/waygate/agent.json'), "
@@ -503,7 +503,8 @@ def test_installed_agent_runs_both_jobs_in_both_image_modes(report_runtime, tmp_
             "PRIVATE_KEY_PATH=str(root / 'etc/wireguard/privatekey'), "
             "WG_CONF=str(root / 'etc/wireguard/wg0.conf'), LOG=str(root / 'agent.log')); "
             "g['syncconf'] = lambda: None; g['apply_masquerade'] = lambda *args: None; "
-            "g['time'].sleep = lambda _: (_ for _ in ()).throw(KeyboardInterrupt()); "
+            "g['time'] = SimpleNamespace(monotonic=g['time'].monotonic, "
+            "sleep=lambda _: (_ for _ in ()).throw(KeyboardInterrupt())); "
             "sys.exit(ns['main'](sys.argv[3:]))",
             str(root),
             script,
