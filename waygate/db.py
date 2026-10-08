@@ -30,16 +30,19 @@ def init_db(
         raise RuntimeError("Waygate requires database.url")
     if _engine is not None:
         return
-    _engine = create_async_engine(
-        database_url,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_pre_ping=True,
-        pool_timeout=pool_timeout,
-        pool_recycle=1800,
-        connect_args={"connect_timeout": connect_timeout},
-        echo=False,
-    )
+    options = {"pool_pre_ping": True, "echo": False}
+    if database_url.startswith("sqlite+"):
+        # Local synthetic-auth smoke uses file-backed SQLite; production remains MariaDB.
+        options["connect_args"] = {"timeout": connect_timeout}
+    else:
+        options.update(
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+            pool_recycle=1800,
+            connect_args={"connect_timeout": connect_timeout},
+        )
+    _engine = create_async_engine(database_url, **options)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False, class_=AsyncSession)
 
 

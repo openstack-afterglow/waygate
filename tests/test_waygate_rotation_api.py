@@ -68,7 +68,9 @@ async def rotation_api(monkeypatch):
     monkeypatch.setattr(waygate_db, "list_all_active_clients", AsyncMock(return_value=[]))
     monkeypatch.setattr(waygate_db, "list_active_attachment_cidrs", AsyncMock(return_value=[]))
     token = await waygate_agent_auth.issue_report_token(record["id"])
-    monkeypatch.setitem(app.dependency_overrides, require_token, lambda: {"project_id": "project-1"})
+    monkeypatch.setitem(app.dependency_overrides, require_token, lambda: {
+        "project_id": "project-1", "roles": ["member", "waygate-inventory_reader", "waygate-gateways_admin"], "is_system_admin": False,
+    })
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client, record, token
 

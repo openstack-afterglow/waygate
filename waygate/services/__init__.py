@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 
 _ALIASES = {
-    "keystone": "waygate.auth",
     "k3s_crypto": "waygate.crypto",
     "neutron": "waygate.services.openstack_ops",
     "nova": "waygate.services.openstack_ops",

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "waygate"
-version = "0.3.1"
+version = "0.3.2"
 description = "OpenStack-native WireGuard gateway service"
 requires-python = ">=3.11"
 [project.optional-dependencies]
@@ -32,6 +32,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "httpx>=0.28.1",
     "fakeredis[lua]>=2.21",
+    "aiosqlite>=0.20.0",
     "ruff>=0.7.0",
 ]
 

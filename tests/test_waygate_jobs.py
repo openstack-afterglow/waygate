@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,11 +20,17 @@ from waygate.api import servers as server_api
 from waygate.auth import require_token
 from waygate.db import Base
 from waygate.main import app
-from waygate.models.orm import WaygateClient, WaygateJob, WaygateNetworkAttachment, WaygateServer
+from waygate.models.orm import (
+    WaygateClient,
+    WaygateExecutionGrant,
+    WaygateJob,
+    WaygateNetworkAttachment,
+    WaygateServer,
+)
 from waygate.models.schemas import WaygateServerCreateRequest
+from waygate.services import execution, waygate_db, waygate_jobs
 from waygate.services import network as waygate_network
 from waygate.services import provisioner as waygate_provisioner
-from waygate.services import waygate_db, waygate_jobs
 from waygate.services.network import WaygateNetworkError
 
 pytestmark = pytest.mark.asyncio
@@ -78,8 +86,45 @@ def _factory(session):
     return lambda: session
 
 
+def _active_grant(purpose: str, project_id: str, server_id: str, user_id: str = "user-1"):
+    return SimpleNamespace(
+        status="active", project_id=project_id, server_id=server_id, user_id=user_id, purpose=purpose,
+        capability=execution._CAPABILITIES[purpose], trust_id="trust-1", trustee_user_id="waygate-service",
+        role_id="role-member", expires_at=datetime.now(UTC) + timedelta(hours=2),
+    )
+
+
+def _grant(engine, project_id: str, server_id: str, purpose: str, user_id: str = "user-1") -> str:
+    grant_id = str(uuid.uuid4())
+    with Session(engine) as session:
+        session.add(WaygateExecutionGrant(
+            id=grant_id, project_id=project_id, server_id=server_id, user_id=user_id, purpose=purpose,
+            capability=execution._CAPABILITIES[purpose], trust_id="trust-" + grant_id,
+            trustee_user_id="waygate-service", role_id="role-member", status="active",
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+        ))
+        session.commit()
+    return grant_id
+
+
+async def _enqueue_delete(engine, project_id: str = "project-1", server_id: str = "server-1") -> bool:
+    return await waygate_jobs.enqueue_delete_job(
+        project_id, server_id, user_id="user-1", username="alice",
+        execution_grant_id=_grant(engine, project_id, server_id, "delete"),
+    )
+
+
+def _delegate(monkeypatch, conn) -> list:
+    """Replace only the Keystone Trust connection; grant binding and job semantics stay real."""
+    opened = []
+    monkeypatch.setattr(execution, "_open_connection", lambda grant: opened.append(grant) or conn)
+    monkeypatch.setattr(execution, "_close_connection", lambda _conn: None)
+    monkeypatch.setattr(execution, "_revoke_trust", lambda *_args: None)
+    return opened
+
+
 async def test_enqueue_provision_commits_server_and_job_in_one_transaction(monkeypatch):
-    session = _Session()
+    session = _Session(objects={(WaygateExecutionGrant, "grant-1"): _active_grant("provision", "project-1", "server-1")})
     monkeypatch.setattr(waygate_jobs, "get_session_factory", lambda: _factory(session))
 
     job_id = await waygate_jobs.enqueue_provision_job(
@@ -95,6 +140,7 @@ async def test_enqueue_provision_commits_server_and_job_in_one_transaction(monke
         },
         user_id="user-1",
         username="alice",
+        execution_grant_id="grant-1",
     )
 
     assert (session.added[0].dns, session.added[0].mtu, session.added[0].persistent_keepalive) == (
@@ -108,11 +154,15 @@ async def test_enqueue_provision_commits_server_and_job_in_one_transaction(monke
     assert session.added[1].id == job_id
     assert session.added[1].kind == "provision"
     assert session.added[1].status == "queued"
+    assert session.added[1].execution_grant_id == "grant-1"
 
 
 async def test_enqueue_delete_marks_server_and_avoids_duplicate_active_job(monkeypatch):
     server = SimpleNamespace(status="ACTIVE", status_reason=None, updated_at=None)
-    session = _Session(execute_values=[server, "existing-job"])
+    session = _Session(
+        execute_values=[server, SimpleNamespace(status="running")],
+        objects={(WaygateExecutionGrant, "grant-1"): _active_grant("delete", "project-1", "server-1")},
+    )
     monkeypatch.setattr(waygate_jobs, "get_session_factory", lambda: _factory(session))
 
     found = await waygate_jobs.enqueue_delete_job(
@@ -120,6 +170,7 @@ async def test_enqueue_delete_marks_server_and_avoids_duplicate_active_job(monke
         "server-1",
         user_id="user-1",
         username="alice",
+        execution_grant_id="grant-1",
     )
 
     assert found is True
@@ -164,7 +215,7 @@ async def test_immediate_delete_waits_while_provision_job_runs(deletion_store):
             status="running", attempts=1, claimed_at=now,
         ))
         session.commit()
-    await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    await _enqueue_delete(deletion_store)
 
     assert await waygate_jobs._claim_one() is None
     with Session(deletion_store) as session:
@@ -203,19 +254,21 @@ async def test_third_failure_terminalizes_job_and_server(monkeypatch):
     ("PROVISIONING", "completed"), ("ACTIVE", "completed"), ("ERROR", "queued"),
 ])
 async def test_provision_completion_requires_durable_server_progress(deletion_store, monkeypatch, outcome, expected):
+    grant_id = _grant(deletion_store, "project-1", "server-1", "provision")
     with Session(deletion_store) as session:
         session.get(WaygateServer, "server-1").status = "ERROR"
         session.add(WaygateJob(
             id="provision", server_id="server-1", project_id="project-1", kind="provision",
-            status="queued", attempts=1,
+            status="queued", attempts=1, execution_grant_id=grant_id, user_id="user-1",
         ))
         session.commit()
 
-    async def provision(_project, server, *_identity):
+    async def provision(_project, server, *_identity, conn):
         assert (await waygate_db.get_server_by_id(server))["status"] == "CREATING"
         await waygate_db.update_server_status(server, outcome, "quota exceeded" if outcome == "ERROR" else "")
 
     monkeypatch.setattr(waygate_jobs, "provision_waygate_server", provision)
+    _delegate(monkeypatch, SimpleNamespace())
     assert await waygate_jobs.process_one_job() is True
 
     with Session(deletion_store) as session:
@@ -267,7 +320,13 @@ async def test_server_create_handler_waits_for_durable_enqueue(monkeypatch):
             waygate_agent_install_mode="prebuilt",
         ),
     )
-    monkeypatch.setattr("waygate.auth.get_admin_connection_for_project", lambda _project_id: conn)
+
+    @contextlib.asynccontextmanager
+    async def admitted(token_info, server_id, purpose):
+        assert (token_info["user_id"], purpose) == ("user-1", "provision")
+        yield SimpleNamespace(id="grant-1"), conn
+
+    monkeypatch.setattr(server_api.execution, "admitted_operation", admitted)
     monkeypatch.setattr("waygate.services.resource_policies.resolve_policy_snapshot", resolve_policy_snapshot)
     monkeypatch.setattr("waygate.services.resource_policies.get_policy_snapshot", get_policy_snapshot)
     monkeypatch.setattr(server_api.waygate_jobs, "enqueue_provision_job", enqueue)
@@ -276,13 +335,16 @@ async def test_server_create_handler_waits_for_durable_enqueue(monkeypatch):
 
     response = await server_api.create_waygate_server(
         WaygateServerCreateRequest(name="gateway-1", dns="1.1.1.1", persistent_keepalive=0),
-        {"project_id": "project-1", "user_id": "user-1", "username": "alice"},
+        {
+            "project_id": "project-1", "user_id": "user-1", "username": "alice",
+            "roles": ["member", "waygate-inventory_reader", "waygate-gateways_editor", "waygate-gateways_admin"], "is_system_admin": False,
+        },
     )
 
     assert response.status == "CREATING"
     assert calls[0][2]["flavor_id"] == "flavor-1"
     assert calls[0][2]["agent_install_mode"] == "prebuilt"
-    assert calls[0][3] == {"user_id": "user-1", "username": "alice"}
+    assert calls[0][3] == {"user_id": "user-1", "username": "alice", "execution_grant_id": "grant-1"}
     assert (calls[0][2]["dns"], calls[0][2]["persistent_keepalive"]) == ("1.1.1.1", 0)
     assert "mtu" not in calls[0][2]
 
@@ -396,6 +458,7 @@ def deletion_store(monkeypatch):
         session.commit()
     monkeypatch.setattr(waygate_db, "get_session_factory", lambda: lambda: _SqlSession(engine))
     monkeypatch.setattr(waygate_jobs, "get_session_factory", lambda: lambda: _SqlSession(engine))
+    monkeypatch.setattr(execution, "get_session_factory", lambda: lambda: _SqlSession(engine))
     yield engine
     engine.dispose()
 
@@ -432,7 +495,7 @@ async def test_server_defaults_patch_is_scoped_atomic_and_preserves_legacy_clien
         server.status = "ACTIVE"
         session.commit()
 
-    assert await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    assert await _enqueue_delete(deletion_store)
     with pytest.raises(waygate_db.WaygateServerInactiveError):
         await waygate_db.update_server_defaults("project-1", "server-1", {"dns": "4.4.4.4"})
     with Session(deletion_store) as session:
@@ -514,6 +577,7 @@ async def test_client_http_create_list_patch_and_config_resolve_current_defaults
     monkeypatch.setattr(client_api, "is_db_available", lambda: True)
     monkeypatch.setattr("waygate.crypto.get_settings", lambda: SimpleNamespace(waygate_encryption_key="a" * 64))
     monkeypatch.setattr(client_api.waygate_agent_auth, "get_status_result", AsyncMock(return_value=None))
+    monkeypatch.setattr(client_api, "validate_client_owner", AsyncMock())
     with Session(deletion_store) as session:
         server = session.get(WaygateServer, "server-1")
         server.server_public_key = "A" * 43 + "="
@@ -523,7 +587,10 @@ async def test_client_http_create_list_patch_and_config_resolve_current_defaults
         session.commit()
 
     async def token():
-        return {"project_id": "project-1", "user_id": "user-1"}
+        return {
+            "project_id": "project-1", "user_id": "user-1",
+            "roles": ["member", "waygate-inventory_reader", "waygate-connect_user", "waygate-clients_editor", "waygate-clients_admin", "waygate-gateways_editor", "waygate-gateways_admin"], "is_system_admin": False,
+        }
 
     app.dependency_overrides[require_token] = token
     try:
@@ -566,7 +633,7 @@ async def test_client_http_create_list_patch_and_config_resolve_current_defaults
             from waygate.services import k3s_crypto, waygate_migration
 
             bundle = await waygate_migration.export_bundle(
-                "project-1", await waygate_db.get_server("project-1", "server-1"), "pw-abcdefgh"
+                "project-1", await waygate_db.get_server("project-1", "server-1"), "pw-abcdefgh", caller_user_id="user-1",
             )
             entries = {entry["name"]: entry for entry in bundle["clients"]}
             assert (entries["inherited"]["dns"], entries["inherited"]["persistent_keepalive"]) == ("1.1.1.1", 55)
@@ -650,7 +717,9 @@ async def test_server_defaults_http_owner_validation_and_readback(deletion_store
 
     async def request_as(project_id):
         async def token():
-            return {"project_id": project_id}
+            return {
+                "project_id": project_id, "roles": ["member", "waygate-inventory_reader", "waygate-gateways_editor"], "is_system_admin": False,
+            }
 
         app.dependency_overrides[require_token] = token
         return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
@@ -690,7 +759,7 @@ async def test_server_defaults_http_owner_validation_and_readback(deletion_store
             cleared = await client.patch("/v1/servers/server-1", json={"dns": None})
             assert cleared.json()["dns"] is None
             assert cleared.json()["persistent_keepalive"] == 0
-            await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+            await _enqueue_delete(deletion_store)
             assert (await client.patch("/v1/servers/server-1", json={"dns": "4.4.4.4"})).status_code == 409
     finally:
         app.dependency_overrides.pop(require_token, None)
@@ -700,7 +769,9 @@ async def test_server_create_rejects_invalid_default_values(monkeypatch):
     monkeypatch.setattr(server_api, "is_db_available", lambda: True)
 
     async def token():
-        return {"project_id": "project-1"}
+        return {
+            "project_id": "project-1", "roles": ["member", "waygate-inventory_reader", "waygate-gateways_editor", "waygate-gateways_admin"], "is_system_admin": False,
+        }
 
     app.dependency_overrides[require_token] = token
     try:
@@ -781,7 +852,7 @@ async def test_terminal_delete_removes_child_access_and_preserves_ownership(dele
 
 
 async def test_deleting_server_blocks_new_children_and_unfinished_port_finalization(deletion_store):
-    assert await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    assert await _enqueue_delete(deletion_store)
     with pytest.raises(waygate_db.WaygateClientConflictError):
         await waygate_db.create_client_record(
             "server-1",
@@ -803,7 +874,7 @@ async def test_deleting_server_blocks_new_children_and_unfinished_port_finalizat
 async def test_raced_attachment_request_returns_conflict_without_allocating_port(deletion_store, monkeypatch):
     stale_server = await waygate_db.get_server("project-1", "server-1")
     stale_server["server_vm_id"] = "vm-1"
-    assert await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    assert await _enqueue_delete(deletion_store)
     conn = SimpleNamespace(
         network=SimpleNamespace(
             get_network=MagicMock(return_value=SimpleNamespace(project_id="project-1")),
@@ -812,11 +883,10 @@ async def test_raced_attachment_request_returns_conflict_without_allocating_port
         close=MagicMock(),
     )
     create_port = MagicMock()
-    monkeypatch.setattr("waygate.services.keystone.get_admin_connection_for_project", lambda _project: conn)
     monkeypatch.setattr(waygate_network.neutron, "create_port", create_port)
 
     with pytest.raises(WaygateNetworkError) as exc:
-        await waygate_network.attach_network("project-1", stale_server, "net-2", "sub-2", "snat")
+        await waygate_network.attach_network("project-1", stale_server, "net-2", "sub-2", "snat", conn=conn)
     assert exc.value.status_code == 409
     create_port.assert_not_called()
     with Session(deletion_store) as session:
@@ -830,7 +900,7 @@ async def test_inflight_attachment_cannot_be_terminalized_before_port_assignment
         att.port_id = None
         session.commit()
 
-    assert await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    assert await _enqueue_delete(deletion_store)
     with pytest.raises(RuntimeError, match="attachment cleanup"):
         await waygate_db.soft_delete_server("project-1", "server-1", "user-1")
     with Session(deletion_store) as session:
@@ -846,11 +916,10 @@ async def test_cloud_delete_waits_for_inflight_attachment(deletion_store, monkey
         session.commit()
     conn = SimpleNamespace(close=MagicMock())
     delete_port = MagicMock()
-    monkeypatch.setattr("waygate.services.keystone.get_admin_connection_for_project", lambda _project: conn)
     monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", delete_port)
 
     with pytest.raises(RuntimeError, match="creation is still in progress"):
-        await waygate_provisioner.delete_waygate_server("project-1", "server-1", "user-1")
+        await waygate_provisioner.delete_waygate_server("project-1", "server-1", "user-1", conn=conn)
     delete_port.assert_not_called()
     with Session(deletion_store) as session:
         server = session.get(WaygateServer, "server-1")
@@ -879,14 +948,14 @@ async def test_delete_job_retries_cloud_failure_before_terminal_cleanup(deletion
             raise RuntimeError("port busy")
 
     wait = MagicMock(side_effect=[TimeoutError("VM deletion timed out"), None] if failure == "vm_timeout" else None)
-    monkeypatch.setattr("waygate.services.keystone.get_admin_connection_for_project", lambda _project: conn)
+    _delegate(monkeypatch, conn)
     monkeypatch.setattr(waygate_provisioner.neutron, "cleanup_instance_fips", MagicMock())
     monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", delete_port)
     monkeypatch.setattr(waygate_provisioner.nova, "delete_server", MagicMock())
     monkeypatch.setattr(waygate_provisioner.nova, "wait_server_deleted", wait)
     monkeypatch.setattr(waygate_provisioner.waygate_agent_auth, "revoke_report_token_by_server", AsyncMock())
 
-    assert await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    assert await _enqueue_delete(deletion_store)
     assert await waygate_jobs.process_one_job() is True
     with Session(deletion_store) as session:
         server = session.get(WaygateServer, "server-1")
@@ -966,13 +1035,13 @@ async def test_discovered_floating_ip_remains_retryable_until_removed(deletion_s
         close=MagicMock(),
     )
     delete_vm = MagicMock()
-    monkeypatch.setattr("waygate.services.keystone.get_admin_connection_for_project", lambda _project: conn)
+    _delegate(monkeypatch, conn)
     monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", MagicMock())
     monkeypatch.setattr(waygate_provisioner.nova, "delete_server", delete_vm)
     monkeypatch.setattr(waygate_provisioner.nova, "wait_server_deleted", MagicMock())
     monkeypatch.setattr(waygate_provisioner.waygate_agent_auth, "revoke_report_token_by_server", AsyncMock())
 
-    await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    await _enqueue_delete(deletion_store)
     await waygate_jobs.process_one_job()
     assert floating_ips["attached"].port_id == "port-1"
     delete_vm.assert_not_called()
@@ -995,13 +1064,9 @@ async def test_detach_preserves_an_attachment_still_being_created(deletion_store
         attachment_id = attachment.id
         session.commit()
     server = await waygate_db.get_server("project-1", "server-1")
-    monkeypatch.setattr(
-        "waygate.services.keystone.get_admin_connection_for_project",
-        lambda _project: SimpleNamespace(close=lambda: None),
-    )
 
     with pytest.raises(WaygateNetworkError) as exc:
-        await waygate_network.detach_network("project-1", server, attachment_id)
+        await waygate_network.detach_network("project-1", server, attachment_id, conn=SimpleNamespace())
     assert exc.value.status_code == 409
     with Session(deletion_store) as session:
         assert session.get(WaygateNetworkAttachment, attachment_id).status == "CREATING"
@@ -1019,7 +1084,7 @@ async def test_delete_supersedes_unstarted_or_expired_provision(deletion_store, 
             created_at=now - timedelta(seconds=10),
         ))
         session.commit()
-    await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    await _enqueue_delete(deletion_store)
 
     claimed = await waygate_jobs._claim_one()
     assert claimed[1:5] == (1, "delete", "project-1", "server-1")
@@ -1036,7 +1101,7 @@ async def test_final_provision_failure_does_not_overwrite_pending_deletion(delet
             status="running", attempts=3, claimed_at=datetime.now(UTC),
         ))
         session.commit()
-    await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    await _enqueue_delete(deletion_store)
 
     assert await waygate_jobs._retry_or_fail("provision", attempt=3, error="cloud unavailable") is True
     with Session(deletion_store) as session:
@@ -1080,7 +1145,7 @@ async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(dele
 
     now = datetime.now(UTC)
     monkeypatch.setattr(waygate_jobs, "_now", lambda: now)
-    await waygate_jobs.enqueue_delete_job("project-2", "server-2", user_id="user-1", username="alice")
+    await _enqueue_delete(deletion_store, "project-2", "server-2")
     process = waygate_jobs.process_one_job
     polls = 0
 
@@ -1091,7 +1156,7 @@ async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(dele
             raise RuntimeError("database connection unavailable")
         return await process()
 
-    async def cancelled_delete(*_args):
+    async def cancelled_delete(*_args, **_kwargs):
         raise asyncio.CancelledError
 
     pauses = []
@@ -1112,6 +1177,7 @@ async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(dele
     monkeypatch.setattr(worker, "process_one_job", recover_poll)
     monkeypatch.setattr(worker.asyncio, "sleep", pause)
     monkeypatch.setattr(waygate_jobs, "delete_waygate_server", cancelled_delete)
+    _delegate(monkeypatch, SimpleNamespace())
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(worker.serve(), timeout=1)
@@ -1129,20 +1195,22 @@ async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(dele
 async def test_completion_write_failure_does_not_fail_successful_last_delete(deletion_store, monkeypatch):
     now = datetime.now(UTC)
     monkeypatch.setattr(waygate_jobs, "_now", lambda: now)
+    grant_id = _grant(deletion_store, "project-2", "server-2", "delete")
     with Session(deletion_store) as session:
         session.add(WaygateJob(
             id="last-delete", server_id="server-2", project_id="project-2", kind="delete",
-            status="queued", attempts=2,
+            status="queued", attempts=2, execution_grant_id=grant_id, user_id="user-1",
         ))
         session.commit()
 
-    async def finalize(project, server, user):
+    async def finalize(project, server, user, *, conn):
         await waygate_db.soft_delete_server(project, server, user)
 
     async def fail_completion(*_args, **_kwargs):
         raise RuntimeError("completion write unavailable")
 
     monkeypatch.setattr(waygate_jobs, "delete_waygate_server", finalize)
+    _delegate(monkeypatch, SimpleNamespace())
     monkeypatch.setattr(waygate_jobs, "_complete", fail_completion)
 
     with pytest.raises(RuntimeError, match="completion write unavailable"):
@@ -1244,7 +1312,7 @@ async def test_pending_delete_takes_precedence_over_successful_provision_reconci
             status="running", attempts=3, claimed_at=now - timedelta(seconds=901),
         ))
         session.commit()
-    await waygate_jobs.enqueue_delete_job("project-1", "server-1", user_id="user-1", username="alice")
+    await _enqueue_delete(deletion_store)
 
     assert (await waygate_jobs._claim_one())[2] == "delete"
     with Session(deletion_store) as session:
@@ -1257,25 +1325,32 @@ async def test_worker_job_success_and_failed_retry_logs_only_safe_stage_metadata
     import logging
 
     claims = iter([
-        ("job-1", 1, "provision", "project-1", "server-1", None, None),
-        ("job-2", 3, "provision", "project-2", "server-2", None, None),
+        ("job-1", 1, "provision", "project-1", "server-1", None, None, "grant-1"),
+        ("job-2", 3, "provision", "project-2", "server-2", None, None, "grant-2"),
     ])
 
     async def claim():
         return next(claims)
 
-    async def provision(_project, server_id, *_identity):
+    async def provision(_project, server_id, *_identity, conn):
         if server_id == "server-2":
             raise RuntimeError("private-secret raw SQL values")
 
     async def complete(_job_id, *, attempt):
         return True
 
-    async def retry(_job_id, *, attempt, error):
+    async def retry(_job_id, *, attempt, error, terminal):
+        assert terminal is False
         assert attempt == 3
         assert error == "private-secret raw SQL values"
         return True
 
+    @contextlib.asynccontextmanager
+    async def connection(grant_id, *_scope):
+        assert grant_id in {"grant-1", "grant-2"}
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(execution, "execution_connection", connection)
     monkeypatch.setattr(waygate_jobs, "_claim_one", claim)
     monkeypatch.setattr(waygate_jobs, "provision_waygate_server", provision)
     monkeypatch.setattr(waygate_jobs, "_complete", complete)

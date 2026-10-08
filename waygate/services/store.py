@@ -28,6 +28,10 @@ class WaygateClientConflictError(Exception):
         super().__init__(f"vpn client unique constraint violation (field={field})")
 
 
+class WaygateClientOwnerConflictError(Exception):
+    """A known profile owner cannot be transferred or cleared (that would expose the existing private key)."""
+
+
 class WaygateServerInactiveError(RuntimeError):
     """A stale creation request lost the race with server deletion."""
 
@@ -80,6 +84,7 @@ def _client_to_dict(c: WaygateClient, server: WaygateServer | None = None) -> di
         "id": c.id,
         "server_id": c.server_id,
         "project_id": c.project_id,
+        "owner_user_id": c.owner_user_id,
         "name": c.name,
         "enabled": c.enabled,
         "public_key": c.public_key,
@@ -459,6 +464,7 @@ async def create_client_record(server_id: str, project_id: str, client_id: str, 
             id=client_id,
             server_id=server_id,
             project_id=project_id,
+            owner_user_id=data.get("owner_user_id"),
             name=data["name"],
             enabled=data.get("enabled", True),
             public_key=data["public_key"],
@@ -569,12 +575,16 @@ async def update_client(server_id: str, project_id: str, client_id: str, **field
         client = result.scalar_one_or_none()
         if client is None:
             return None
+        # The parent-row lock serializes client updates; ownership is assignable only while unknown.
+        if "owner_user_id" in fields and client.owner_user_id is not None and fields["owner_user_id"] != client.owner_user_id:
+            raise WaygateClientOwnerConflictError()
         if "dns" in fields:
             fields.setdefault("inherit_dns", False)
         if "persistent_keepalive" in fields:
             fields.setdefault("inherit_persistent_keepalive", False)
         for field in (
             "name",
+            "owner_user_id",
             "enabled",
             "dns",
             "mtu",

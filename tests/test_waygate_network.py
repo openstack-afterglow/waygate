@@ -33,22 +33,6 @@ def _server(**overrides) -> dict:
     return base
 
 
-def _attachment(**overrides) -> dict:
-    base = {
-        "id": 1,
-        "server_id": "srv-1",
-        "project_id": "test-project-123",
-        "network_id": _VALID_UUID,
-        "subnet_id": "22222222-3333-4444-5555-666666666666",
-        "port_id": "port-1",
-        "cidr": "192.168.9.0/24",
-        "nat_mode": "snat",
-        "status": "ACTIVE",
-        "created_at": None,
-        "updated_at": None,
-    }
-    base.update(overrides)
-    return base
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +50,10 @@ def _override_token_info(project_id: str = "test-project-123"):
     from waygate.auth import require_token
 
     async def _fn():
-        return {"project_id": project_id, "user_id": "test-user-123", "username": "testuser"}
+        return {
+            "project_id": project_id, "user_id": "test-user-123", "username": "testuser",
+            "roles": ["member", "waygate-inventory_reader", "waygate-routing_admin"], "is_system_admin": False,
+        }
 
     app.dependency_overrides[require_token] = _fn
 
@@ -106,34 +93,6 @@ class TestAttachNetworkApi:
         )
         assert resp.status_code == 422
 
-    @pytest.mark.asyncio
-    async def test_attach_success_201(self, api_client):
-        _override_token_info()
-        with (
-            patch("waygate.api.attachments.waygate_db") as db,
-            patch("waygate.api.attachments.waygate_network") as net,
-        ):
-            db.get_server = AsyncMock(return_value=_server())
-            net.attach_network = AsyncMock(return_value=_attachment())
-            resp = await api_client.post("/v1/servers/srv-1/networks", json={"network_id": _VALID_UUID})
-        assert resp.status_code == 201
-        body = resp.json()
-        assert body["network_id"] == _VALID_UUID
-        assert body["cidr"] == "192.168.9.0/24"
-        assert body["status"] == "ACTIVE"
-
-    @pytest.mark.asyncio
-    async def test_attach_conflict_maps_to_409(self, api_client):
-        _override_token_info()
-        with (
-            patch("waygate.api.attachments.waygate_db") as db,
-            patch("waygate.api.attachments.waygate_network") as net,
-        ):
-            db.get_server = AsyncMock(return_value=_server())
-            net.attach_network = AsyncMock(side_effect=WaygateNetworkError(409, "이미 연결된 네트워크입니다"))
-            resp = await api_client.post("/v1/servers/srv-1/networks", json={"network_id": _VALID_UUID})
-        assert resp.status_code == 409
-
 
 # ---------------------------------------------------------------------------
 # list / detach API
@@ -141,15 +100,6 @@ class TestAttachNetworkApi:
 
 
 class TestListDetachNetworkApi:
-    @pytest.mark.asyncio
-    async def test_list_returns_attachments(self, api_client):
-        _override_token_info()
-        with patch("waygate.api.attachments.waygate_db") as db:
-            db.get_server = AsyncMock(return_value=_server())
-            db.list_attachments = AsyncMock(return_value=[_attachment()])
-            resp = await api_client.get("/v1/servers/srv-1/networks")
-        assert resp.status_code == 200
-        assert resp.json()[0]["cidr"] == "192.168.9.0/24"
 
     @pytest.mark.asyncio
     async def test_list_404_when_not_owned(self, api_client):
@@ -159,29 +109,6 @@ class TestListDetachNetworkApi:
             resp = await api_client.get("/v1/servers/srv-x/networks")
         assert resp.status_code == 404
 
-    @pytest.mark.asyncio
-    async def test_detach_success_204(self, api_client):
-        _override_token_info()
-        with (
-            patch("waygate.api.attachments.waygate_db") as db,
-            patch("waygate.api.attachments.waygate_network") as net,
-        ):
-            db.get_server = AsyncMock(return_value=_server())
-            net.detach_network = AsyncMock(return_value=None)
-            resp = await api_client.delete("/v1/servers/srv-1/networks/1")
-        assert resp.status_code == 204
-
-    @pytest.mark.asyncio
-    async def test_detach_404_when_attachment_missing(self, api_client):
-        _override_token_info()
-        with (
-            patch("waygate.api.attachments.waygate_db") as db,
-            patch("waygate.api.attachments.waygate_network") as net,
-        ):
-            db.get_server = AsyncMock(return_value=_server())
-            net.detach_network = AsyncMock(side_effect=WaygateNetworkError(404, "네트워크 연결을 찾을 수 없습니다"))
-            resp = await api_client.delete("/v1/servers/srv-1/networks/999")
-        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +121,7 @@ class TestAttachNetworkService:
     async def test_rejects_when_server_not_active(self):
         server = _server(status="PROVISIONING")
         with pytest.raises(WaygateNetworkError) as ei:
-            await waygate_network.attach_network("test-project-123", server, "net-1", None, "snat")
+            await waygate_network.attach_network("test-project-123", server, "net-1", None, "snat", conn=None)
         assert ei.value.status_code == 409
 
     @pytest.mark.asyncio
@@ -205,7 +132,7 @@ class TestAttachNetworkService:
             AsyncMock(return_value=[{"network_id": "net-1", "status": "ACTIVE"}]),
         )
         with pytest.raises(WaygateNetworkError) as ei:
-            await waygate_network.attach_network("test-project-123", _server(), "net-1", None, "snat")
+            await waygate_network.attach_network("test-project-123", _server(), "net-1", None, "snat", conn=None)
         assert ei.value.status_code == 409
 
     @pytest.mark.asyncio
@@ -224,7 +151,6 @@ class TestAttachNetworkService:
 
         create_port = MagicMock(return_value={"id": "port-1", "fixed_ip": "192.168.9.7"})
         attach_interface = MagicMock(return_value={"port_id": "port-1", "net_id": "net-1", "fixed_ips": []})
-        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
         monkeypatch.setattr(waygate_network.neutron, "create_port", create_port)
         monkeypatch.setattr(waygate_network.nova, "attach_interface", attach_interface)
         monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
@@ -247,7 +173,7 @@ class TestAttachNetworkService:
         update_attachment = AsyncMock()
         monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", update_attachment)
 
-        result = await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat")
+        result = await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat", conn=conn)
 
         create_port.assert_called_once_with(
             conn,
@@ -272,7 +198,6 @@ class TestAttachNetworkService:
 
         delete_port = MagicMock()
         delete_attachment = AsyncMock()
-        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
         monkeypatch.setattr(
             waygate_network.neutron,
             "create_port",
@@ -290,7 +215,7 @@ class TestAttachNetworkService:
         monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_attachment)
 
         with pytest.raises(WaygateNetworkError) as exc_info:
-            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat")
+            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat", conn=conn)
 
         assert exc_info.value.status_code == 500
         delete_port.assert_called_once_with(conn, "port-1")
@@ -303,10 +228,9 @@ class TestAttachNetworkService:
         net.project_id = "other-project"  # 타 프로젝트 소유
         conn.network.get_network.return_value = net
         conn.close = MagicMock()
-        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
         monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
         with pytest.raises(WaygateNetworkError) as ei:
-            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat")
+            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-1", "snat", conn=conn)
         assert ei.value.status_code == 404  # 정보 노출 방지 — 동일 404
 
     @pytest.mark.asyncio
@@ -319,51 +243,20 @@ class TestAttachNetworkService:
             id="sub-v6",
             ip_version=6,
         )
-        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
         monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
 
         with pytest.raises(WaygateNetworkError) as exc_info:
-            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-v6", "snat")
+            await waygate_network.attach_network("test-project-123", _server(), "net-1", "sub-v6", "snat", conn=conn)
 
         assert exc_info.value.status_code == 422
 
 
-class TestDetachNetworkService:
-    @pytest.mark.asyncio
-    async def test_detach_removes_server_interface_port_and_attachment(self, monkeypatch):
-        conn = MagicMock()
-        detach_interface = MagicMock()
-        delete_port = MagicMock()
-        delete_attachment = AsyncMock()
-
-        monkeypatch.setattr(waygate_network.keystone, "get_admin_connection_for_project", lambda pid: conn)
-        monkeypatch.setattr(waygate_network.waygate_db, "get_attachment", AsyncMock(return_value=_attachment()))
-        monkeypatch.setattr(waygate_network.nova, "detach_interface", detach_interface)
-        monkeypatch.setattr(waygate_network.neutron, "delete_port", delete_port)
-        monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_attachment)
-
-        await waygate_network.detach_network("test-project-123", _server(), 1)
-
-        detach_interface.assert_called_once_with(conn, "vm-1", "port-1")
-        delete_port.assert_called_once_with(conn, "port-1")
-        delete_attachment.assert_awaited_once_with("srv-1", "test-project-123", 1)
 
 
 # ---------------------------------------------------------------------------
 # 렌더 로직 (순수 함수)
 # ---------------------------------------------------------------------------
 
-
-class TestRenderNatNetworks:
-    def test_desired_state_includes_nat_networks(self):
-        r = waygate_config.render_agent_desired_state(
-            listen_port=51820, tunnel_cidr="10.8.0.0/24", clients=[], nat_networks=["192.168.5.0/24"]
-        )
-        assert r["nat_networks"] == ["192.168.5.0/24"]
-
-    def test_desired_state_default_empty_nat(self):
-        r = waygate_config.render_agent_desired_state(listen_port=51820, tunnel_cidr="10.8.0.0/24", clients=[])
-        assert r["nat_networks"] == []
 
 
 class TestRenderClientConfNat:

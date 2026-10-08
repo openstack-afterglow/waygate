@@ -100,6 +100,8 @@ class WaygateClient(Base):
         CHAR(36), ForeignKey("waygate_servers.id", ondelete="CASCADE"), nullable=False, index=True
     )
     project_id: Mapped[str] = mapped_column(VARCHAR(64), nullable=False, index=True)
+    # Keystone user assignment; unknown legacy/imported owners deliberately remain NULL.
+    owner_user_id: Mapped[str | None] = mapped_column(VARCHAR(64), nullable=True)
     # NOTE: soft-delete 시 NULL로 비워 uq_waygate_client_server_name 슬롯을 해제한다(아래 참고).
     name: Mapped[str | None] = mapped_column(VARCHAR(63))
     enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, default=True)
@@ -168,6 +170,28 @@ class WaygateNetworkAttachment(Base):
     __table_args__ = (Index("idx_waygate_netattach_server", "server_id"),)
 
 
+class WaygateExecutionGrant(Base):
+    """Bounded tenant authority; no requester password or login token is stored."""
+
+    __tablename__ = "waygate_execution_grants"
+
+    id: Mapped[str] = mapped_column(CHAR(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
+    server_id: Mapped[str] = mapped_column(CHAR(36), nullable=False)
+    user_id: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
+    capability: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
+    purpose: Mapped[str] = mapped_column(VARCHAR(16), nullable=False)
+    trust_id: Mapped[str | None] = mapped_column(VARCHAR(64), unique=True)
+    trustee_user_id: Mapped[str | None] = mapped_column(VARCHAR(64))
+    role_id: Mapped[str | None] = mapped_column(VARCHAR(64))
+    status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, default="admitting")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (Index("idx_waygate_grant_cleanup", "status", "expires_at"),)
+
+
 class WaygateJob(Base):
     """Durable Waygate server provision/delete work item."""
 
@@ -182,6 +206,9 @@ class WaygateJob(Base):
     last_error: Mapped[str | None] = mapped_column(TEXT)
     user_id: Mapped[str | None] = mapped_column(VARCHAR(64))
     username: Mapped[str | None] = mapped_column(VARCHAR(255))
+    execution_grant_id: Mapped[str | None] = mapped_column(
+        CHAR(36), ForeignKey("waygate_execution_grants.id"), unique=True, nullable=True
+    )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)

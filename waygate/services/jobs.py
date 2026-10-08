@@ -14,8 +14,8 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import aliased
 
 from waygate.db import get_session_factory
-from waygate.models.orm import WaygateJob, WaygateServer
-from waygate.services import waygate_db
+from waygate.models.orm import WaygateExecutionGrant, WaygateJob, WaygateServer
+from waygate.services import execution, waygate_db
 from waygate.services.provisioner import delete_waygate_server, provision_waygate_server
 
 _logger = logging.getLogger(__name__)
@@ -27,6 +27,21 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+async def _lock_execution_grant(
+    session, grant_id: str, project_id: str, server_id: str, user_id: str | None, kind: str
+):
+    grant = await session.get(WaygateExecutionGrant, grant_id, with_for_update=True)
+    if (
+        grant is None
+        or grant.status != "active"
+        or (grant.project_id, grant.server_id, grant.user_id, grant.purpose) != (project_id, server_id, user_id, kind)
+        or grant.capability != execution._CAPABILITIES.get(kind)
+        or not all((grant.trust_id, grant.trustee_user_id, grant.role_id))
+        or execution._utc(grant.expires_at) <= _now()
+    ):
+        raise execution.ExecutionDenied("Waygate job requires its own admitted execution delegation")
+
+
 def _new_job(
     *,
     server_id: str,
@@ -34,6 +49,7 @@ def _new_job(
     kind: str,
     user_id: str | None,
     username: str | None,
+    execution_grant_id: str,
 ) -> WaygateJob:
     if kind not in {"provision", "delete"}:
         raise ValueError(f"unsupported Waygate job kind: {kind}")
@@ -45,6 +61,7 @@ def _new_job(
         status="queued",
         user_id=user_id or None,
         username=username or None,
+        execution_grant_id=execution_grant_id,
     )
 
 
@@ -55,12 +72,14 @@ async def enqueue_provision_job(
     *,
     user_id: str | None,
     username: str | None,
+    execution_grant_id: str,
 ) -> str:
     """Create the server and its provision job in one transaction."""
     factory = get_session_factory()
     if factory is None:
         raise RuntimeError("Waygate database is unavailable")
     async with factory() as session, session.begin():
+        await _lock_execution_grant(session, execution_grant_id, project_id, server_id, user_id, "provision")
         waygate_db.add_server_record(session, project_id, server_id, server_data)
         job = _new_job(
             server_id=server_id,
@@ -68,6 +87,7 @@ async def enqueue_provision_job(
             kind="provision",
             user_id=user_id,
             username=username,
+            execution_grant_id=execution_grant_id,
         )
         session.add(job)
         return job.id
@@ -79,6 +99,7 @@ async def enqueue_delete_job(
     *,
     user_id: str | None,
     username: str | None,
+    execution_grant_id: str,
 ) -> bool:
     """Mark a caller-owned server deleting and enqueue exactly one active job."""
     factory = get_session_factory()
@@ -101,7 +122,7 @@ async def enqueue_delete_job(
 
         existing = (
             await session.execute(
-                select(WaygateJob.id)
+                select(WaygateJob)
                 .where(
                     WaygateJob.server_id == server_id,
                     WaygateJob.project_id == project_id,
@@ -111,6 +132,12 @@ async def enqueue_delete_job(
                 .limit(1)
             )
         ).scalar_one_or_none()
+        await _lock_execution_grant(session, execution_grant_id, project_id, server_id, user_id, "delete")
+        if existing is not None and existing.status == "queued":
+            existing.status = "failed"
+            existing.last_error = "Deletion superseded by a newly authorized request"
+            existing.updated_at = _now()
+            existing = None
         server.status = "DELETING"
         server.status_reason = "삭제 작업 대기 중"
         server.updated_at = _now()
@@ -122,6 +149,7 @@ async def enqueue_delete_job(
                     kind="delete",
                     user_id=user_id,
                     username=username,
+                    execution_grant_id=execution_grant_id,
                 )
             )
         return True
@@ -149,7 +177,7 @@ async def _mark_server_failed(session, job: WaygateJob, error: str) -> None:
         server.updated_at = _now()
 
 
-async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None] | None:
+async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None, str | None] | None:
     factory = get_session_factory()
     if factory is None:
         raise RuntimeError("Waygate database is unavailable")
@@ -262,6 +290,7 @@ async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None]
                 job.server_id,
                 job.user_id,
                 job.username,
+                job.execution_grant_id,
             )
 
 
@@ -280,7 +309,7 @@ async def _complete(job_id: str, *, attempt: int) -> bool:
         return True
 
 
-async def _retry_or_fail(job_id: str, *, attempt: int, error: str) -> bool:
+async def _retry_or_fail(job_id: str, *, attempt: int, error: str, terminal: bool = False) -> bool:
     factory = get_session_factory()
     if factory is None:
         raise RuntimeError("Waygate database is unavailable")
@@ -292,7 +321,7 @@ async def _retry_or_fail(job_id: str, *, attempt: int, error: str) -> bool:
         job.last_error = clean_error
         job.claimed_at = None
         job.updated_at = _now()
-        if job.attempts >= _MAX_ATTEMPTS:
+        if terminal or job.attempts >= _MAX_ATTEMPTS:
             job.status = "failed"
             await _mark_server_failed(session, job, clean_error)
         else:
@@ -302,47 +331,54 @@ async def _retry_or_fail(job_id: str, *, attempt: int, error: str) -> bool:
 
 async def process_one_job() -> bool:
     """Claim and process at most one durable Waygate job."""
+    cleaned = await execution.cleanup_one_grant()
     claimed = await _claim_one()
     if _logger.isEnabledFor(logging.DEBUG):
         _logger.debug("job query=claim result=%s", "none" if claimed is None else "found")
     if claimed is None:
-        return False
-    job_id, attempt, kind, project_id, server_id, user_id, username = claimed
+        return cleaned
+    job_id, attempt, kind, project_id, server_id, user_id, username, grant_id = claimed
     _logger.info("job stage=claimed kind=%s attempt=%d status=running", kind, attempt)
     try:
-        if kind == "provision":
-            if attempt > 1:
-                await waygate_db.update_server_status(
-                    server_id, "CREATING", "프로비저닝 재시도 중", only_if_status="ERROR"
-                )
-            await provision_waygate_server(project_id, server_id, user_id or "", username or "")
-            server = await waygate_db.get_server_by_id(server_id)
-            if server is None:
-                raise RuntimeError("Waygate server disappeared during provisioning")
-            if server["status"] not in {"PROVISIONING", "ACTIVE"}:
-                raise RuntimeError(server.get("status_reason") or f"unexpected server status: {server['status']}")
-        elif kind == "delete":
-            if attempt > 1:
-                await waygate_db.update_server_status(server_id, "DELETING", "삭제 재시도 중")
-            await delete_waygate_server(project_id, server_id, user_id or "")
-            state = await waygate_db.get_server_deletion_state(project_id, server_id)
-            if state != ("DELETED", True):
-                raise RuntimeError(f"Waygate server deletion did not reach terminal state: {state}")
-        else:
-            raise RuntimeError(f"unsupported Waygate job kind: {kind}")
+        async with execution.execution_connection(grant_id, project_id, server_id, user_id or "", kind) as conn:
+            if kind == "provision":
+                if attempt > 1:
+                    await waygate_db.update_server_status(
+                        server_id, "CREATING", "프로비저닝 재시도 중", only_if_status="ERROR"
+                    )
+                await provision_waygate_server(project_id, server_id, user_id or "", username or "", conn=conn)
+                server = await waygate_db.get_server_by_id(server_id)
+                if server is None:
+                    raise RuntimeError("Waygate server disappeared during provisioning")
+                if server["status"] not in {"PROVISIONING", "ACTIVE"}:
+                    raise RuntimeError(server.get("status_reason") or f"unexpected server status: {server['status']}")
+            elif kind == "delete":
+                if attempt > 1:
+                    await waygate_db.update_server_status(server_id, "DELETING", "삭제 재시도 중")
+                await delete_waygate_server(project_id, server_id, user_id or "", conn=conn)
+                state = await waygate_db.get_server_deletion_state(project_id, server_id)
+                if state != ("DELETED", True):
+                    raise RuntimeError(f"Waygate server deletion did not reach terminal state: {state}")
+            else:
+                raise RuntimeError(f"unsupported Waygate job kind: {kind}")
     except Exception as exc:
-        retried = await _retry_or_fail(job_id, attempt=attempt, error=str(exc))
+        terminal = isinstance(exc, execution.ExecutionDenied)
+        retried = await _retry_or_fail(job_id, attempt=attempt, error=str(exc), terminal=terminal)
+        if retried and (terminal or attempt >= _MAX_ATTEMPTS) and grant_id:
+            await execution.retire_grant(grant_id)
         _logger.info(
             "job stage=finish kind=%s attempt=%d status=%s error_type=%s",
             kind,
             attempt,
-            ("failed" if attempt >= _MAX_ATTEMPTS else "queued") if retried else "lease_lost",
+            ("failed" if terminal or attempt >= _MAX_ATTEMPTS else "queued") if retried else "lease_lost",
             type(exc).__name__,
         )
     else:
         # A failed completion write is not a failed cloud operation. Leave the
         # lease intact so a later claim can reconcile a committed tombstone.
         completed = await _complete(job_id, attempt=attempt)
+        if completed and grant_id:
+            await execution.retire_grant(grant_id)
         _logger.info(
             "job stage=finish kind=%s attempt=%d status=%s",
             kind,

@@ -11,6 +11,7 @@ import logging
 
 from waygate.config import get_settings, require_public_callback_base_url
 from waygate.services import neutron, nova, waygate_agent_auth, waygate_config, waygate_db
+from waygate.services.execution import ExecutionDenied
 from waygate.services.openstack_ops import _allocate_new_fip, _extract_fixed_ip, _wait_for_active
 
 _logger = logging.getLogger(__name__)
@@ -63,6 +64,29 @@ def _ensure_wireguard_sg(conn, project_id: str, listen_port: int) -> str:
     return sg_id
 
 
+def _boot_kwargs(conn, flavor_id: str, image_id: str) -> dict:
+    flavor = conn.compute.get_flavor(flavor_id)
+    if flavor is None:
+        raise RuntimeError("Waygate flavor is unavailable in the execution scope")
+    if flavor.disk != 0:
+        return {"image_id": image_id}
+    image = conn.image.get_image(image_id)
+    if image is None:
+        raise RuntimeError("Waygate image is unavailable in the execution scope")
+    return {
+        "block_device_mapping": [
+            {
+                "uuid": image_id,
+                "source_type": "image",
+                "destination_type": "volume",
+                "volume_size": max(10, int(image.min_disk or 0)),
+                "boot_index": 0,
+                "delete_on_termination": True,
+            }
+        ]
+    }
+
+
 # ---------------------------------------------------------------------------
 # 프로비저닝
 # ---------------------------------------------------------------------------
@@ -73,13 +97,14 @@ async def provision_waygate_server(
     server_id: str,
     user_id: str,
     username: str,
+    *,
+    conn,
 ) -> None:
     """VPN 서버 프로비저닝 백그라운드 태스크.
 
     DB에 CREATING 레코드가 이미 존재한다고 가정(호출부에서 먼저 insert).
     실패 시 이미 생성한 리소스를 역순 정리하고 DB status=ERROR 기록.
     """
-    from waygate.services import keystone
 
     settings = get_settings()
     try:
@@ -93,13 +118,6 @@ async def provision_waygate_server(
     created_port_id: str | None = None
     created_server_vm_id: str | None = None
     created_fip_id: str | None = None
-
-    try:
-        conn = await asyncio.to_thread(keystone.get_admin_connection_for_project, project_id)
-    except Exception as e:
-        _logger.error("waygate_provisioner: OpenStack 연결 실패 (project=%s): %s", project_id, e)
-        await waygate_db.update_server_status(server_id, "ERROR", f"OpenStack 연결 실패: {e}")
-        return
 
     try:
         server_record = await waygate_db.get_server_by_id(server_id)
@@ -120,6 +138,7 @@ async def provision_waygate_server(
         ).get("id")
         if not all((provider_network_id, flavor_id, image_id)):
             raise RuntimeError("Waygate resource policy snapshot is incomplete")
+        boot_kwargs = await asyncio.to_thread(_boot_kwargs, conn, flavor_id, image_id)
 
         # 1. WireGuard ingress SG (idempotent)
         sg_id = await asyncio.to_thread(_ensure_wireguard_sg, conn, project_id, listen_port)
@@ -149,7 +168,7 @@ async def provision_waygate_server(
 
         create_kwargs: dict = {
             "name": name,
-            "image_id": image_id,
+            **boot_kwargs,
             "flavor_id": flavor_id,
             "networks": [{"port": port["id"]}],
             "user_data": userdata,
@@ -201,6 +220,8 @@ async def provision_waygate_server(
             endpoint_ip,
         )
 
+    except ExecutionDenied:
+        raise
     except Exception as e:
         _logger.error("waygate_provisioner: 프로비저닝 실패 (server=%s): %s", server_id, e, exc_info=True)
         await _rollback(
@@ -211,11 +232,6 @@ async def provision_waygate_server(
             sg_id=created_sg_id,
         )
         await waygate_db.update_server_status(server_id, "ERROR", f"프로비저닝 실패: {e}")
-    finally:
-        try:
-            await asyncio.to_thread(conn.close)
-        except Exception:
-            pass
 
 
 async def _rollback(
@@ -246,21 +262,13 @@ async def _rollback(
 # ---------------------------------------------------------------------------
 
 
-async def delete_waygate_server(project_id: str, server_id: str, user_id: str) -> None:
+async def delete_waygate_server(project_id: str, server_id: str, user_id: str, *, conn) -> None:
     """Waygate 서버 삭제 백그라운드 태스크. 소유권 검증은 호출부(API)에서 이미 수행됨."""
-    from waygate.services import keystone
 
     server_record = await waygate_db.get_server(project_id, server_id)
     if not server_record:
         _logger.warning("waygate_provisioner: delete 대상 server %s not found (project=%s)", server_id, project_id)
         return
-
-    try:
-        conn = await asyncio.to_thread(keystone.get_admin_connection_for_project, project_id)
-    except Exception as e:
-        _logger.error("waygate_provisioner: delete 시 OpenStack 연결 실패: %s", e)
-        await waygate_db.update_server_status(server_id, "ERROR", f"삭제 중 연결 실패: {e}")
-        raise
 
     try:
         vm_id = server_record.get("server_vm_id")
@@ -300,8 +308,3 @@ async def delete_waygate_server(project_id: str, server_id: str, user_id: str) -
         _logger.error("waygate_provisioner: 삭제 실패 (server=%s): %s", server_id, e, exc_info=True)
         await waygate_db.update_server_status(server_id, "ERROR", f"삭제 실패: {e}")
         raise
-    finally:
-        try:
-            await asyncio.to_thread(conn.close)
-        except Exception:
-            pass

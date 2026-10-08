@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from waygate.auth import require_token
+from waygate.auth import require_credentials_admin
 from waygate.db import is_db_available
 from waygate.models.schemas import WaygateExportRequest, WaygateImportRequest, WaygateImportResult
 from waygate.services import waygate_db, waygate_migration
@@ -35,7 +35,7 @@ async def _get_owned_server(project_id: str, server_id: str) -> dict:
 async def export_waygate_server(
     server_id: str,
     body: WaygateExportRequest,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_credentials_admin),
 ):
     """서버의 클라이언트+네트워크 연결을 패스프레이즈로 래핑한 번들 JSON 으로 내보낸다.
 
@@ -45,7 +45,9 @@ async def export_waygate_server(
     project_id = token_info["project_id"]
     server = await _get_owned_server(project_id, server_id)
     try:
-        bundle = await waygate_migration.export_bundle(project_id, server, body.passphrase)
+        bundle = await waygate_migration.export_bundle(
+            project_id, server, body.passphrase, caller_user_id=token_info["user_id"],
+        )
     except WaygateMigrationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e
     filename = f"{server.get('name') or 'waygate'}-export.json"
@@ -62,7 +64,7 @@ async def export_waygate_server(
 async def import_waygate_server(
     server_id: str,
     body: WaygateImportRequest,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_credentials_admin),
 ):
     """번들의 클라이언트를 (이미 프로비저닝된) 대상 서버로 재생성한다."""
     _require_db()

@@ -159,6 +159,7 @@ class WaygateClientCreateRequest(BaseModel):
     """VPN 클라이언트(peer) 발급 요청."""
 
     name: str
+    owner_user_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     allowed_ips: list[str] | None = Field(default=None, max_length=20)
     dns: str | None = None
     mtu: int | None = Field(default=None, ge=576, le=9000, strict=True)
@@ -226,6 +227,7 @@ class WaygateClientUpdateRequest(BaseModel):
     """VPN 클라이언트 수정 요청. 생략된 값은 유지하고 명시한 값은 override 한다."""
 
     name: str | None = None
+    owner_user_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     enabled: bool | None = None
     dns: str | None = None
     mtu: int | None = Field(default=None, ge=576, le=9000, strict=True)
@@ -267,6 +269,7 @@ class WaygateClientInfo(BaseModel):
     server_id: str
     project_id: str
     name: str
+    owner_user_id: str | None = None
     enabled: bool
     public_key: str
     tunnel_ip: str
@@ -289,9 +292,9 @@ class WaygateClientInfo(BaseModel):
 
 
 class WaygateClientCreateResponse(WaygateClientInfo):
-    """클라이언트 발급 직후 1회 응답 — 평문 .conf 를 포함한다."""
+    """Creation metadata; tunnel_conf requires connect-user on an enabled owned profile, otherwise null."""
 
-    tunnel_conf: str
+    tunnel_conf: str | None = None
 
 
 # ---------------------------------------------------------------------------

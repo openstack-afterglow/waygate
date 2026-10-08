@@ -81,14 +81,19 @@ def unwrap_with_passphrase(blob: str, passphrase: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def export_bundle(project_id: str, server: dict, passphrase: str) -> dict:
-    """서버의 클라이언트 + 네트워크 연결을 패스프레이즈로 래핑해 번들 dict 를 반환한다."""
+async def export_bundle(project_id: str, server: dict, passphrase: str, *, caller_user_id: str) -> dict:
+    """Export caller-owned and unassigned administrative profiles; never another member's private keys."""
     server_id = server["id"]
     clients = await waygate_db.list_clients(server_id, project_id)
     attachments = await waygate_db.list_attachments(server_id, project_id)
 
     client_entries = []
+    excluded_client_ids = []
     for c in clients:
+        # Credential administration does not override a known user's private ownership.
+        if c.get("owner_user_id") and c["owner_user_id"] != caller_user_id:
+            excluded_client_ids.append(c["id"])
+            continue
         try:
             plain_priv = k3s_crypto.decrypt_wg_client_key(c["private_key_encrypted"])
             plain_psk = (
@@ -116,6 +121,9 @@ async def export_bundle(project_id: str, server: dict, passphrase: str) -> dict:
 
     return {
         "version": BUNDLE_VERSION,
+        "export_scope": "caller_owned_and_unassigned_profiles",
+        "excluded_assigned_client_count": len(excluded_client_ids),
+        "excluded_assigned_client_ids": excluded_client_ids,
         "server": {
             "name": server.get("name"),
             "listen_port": server.get("listen_port"),
@@ -145,6 +153,7 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
 
     반환: {"imported": n, "skipped": [{"name","reason"}]}
     각 클라이언트 이름/allowed_ips/dns/mtu/persistent_keepalive 는 기존 request schema 로 재검증한다.
+    Source owner metadata is ignored; imported clients remain unassigned in the target project.
     """
     from waygate.models.schemas import WaygateClientCreateRequest
 
@@ -206,6 +215,8 @@ async def import_bundle(project_id: str, target_server: dict, bundle: dict, pass
                 str(uuid.uuid4()),
                 {
                     "name": validated.name,
+                    # Bundle ownership is not authority in the target project.
+                    "owner_user_id": None,
                     "enabled": entry.get("enabled", True),
                     "public_key": derived_pub,
                     "private_key_encrypted": k3s_crypto.encrypt_wg_client_key(plain_priv),

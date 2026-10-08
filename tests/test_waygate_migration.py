@@ -101,7 +101,7 @@ class TestExportBundle:
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
 
-        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "passphrase-1234")
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "passphrase-1234", caller_user_id="test-user-123")
 
         assert bundle["version"] == waygate_migration.BUNDLE_VERSION
         # 서버 섹션에 private key 계열 필드가 없어야 한다
@@ -126,7 +126,7 @@ class TestExportBundle:
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
 
-        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh", caller_user_id="test-user-123")
 
         entry = bundle["clients"][0]
         assert bundle["version"] == 1
@@ -144,7 +144,7 @@ class TestExportBundle:
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
 
-        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh", caller_user_id="test-user-123")
 
         assert bundle["clients"] == []
 
@@ -160,7 +160,7 @@ class TestImportBundle:
         rec, priv, pub = _make_client()
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
-        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh", caller_user_id="test-user-123")
         bundle["clients"][0].pop("mtu")
         bundle["clients"][0].pop("persistent_keepalive")
 
@@ -197,7 +197,7 @@ class TestImportBundle:
         )
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
-        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh")
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "pw-abcdefgh", caller_user_id="test-user-123")
         create = AsyncMock()
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
         monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", create)
@@ -216,7 +216,7 @@ class TestImportBundle:
         rec, priv, pub = _make_client()
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[rec]))
         monkeypatch.setattr(waygate_migration.waygate_db, "list_attachments", AsyncMock(return_value=[]))
-        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "correct-pw-1")
+        bundle = await waygate_migration.export_bundle("test-project-123", _server(), "correct-pw-1", caller_user_id="test-user-123")
 
         monkeypatch.setattr(waygate_migration.waygate_db, "list_clients", AsyncMock(return_value=[]))
         monkeypatch.setattr(waygate_migration.waygate_db, "create_client_record", AsyncMock())
@@ -469,7 +469,10 @@ def _override_token_info(project_id: str = "test-project-123"):
     from waygate.auth import require_token
 
     async def _fn():
-        return {"project_id": project_id, "user_id": "test-user-123", "username": "testuser"}
+        return {
+            "project_id": project_id, "user_id": "test-user-123", "username": "testuser",
+            "roles": ["member", "waygate-clients_admin", "waygate-routing_admin"], "is_system_admin": False,
+        }
 
     app.dependency_overrides[require_token] = _fn
 

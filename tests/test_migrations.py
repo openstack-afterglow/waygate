@@ -83,3 +83,41 @@ def test_server_client_defaults_migration_preserves_explicit_legacy_settings():
         for column in ("inherit_dns", "inherit_persistent_keepalive"):
             with pytest.raises(sqlite3.IntegrityError):
                 connection.execute(f"UPDATE waygate_clients SET {column} = NULL WHERE id = 'explicit'")
+
+
+def test_native_migration_manifest_includes_additive_owner_upgrade():
+    assert [entry.logical_id for entry in migrate.load_manifest()] == [
+        "001_baseline", "002_agent_install_mode_and_token_rotation", "003_client_tunnel_settings",
+        "004_server_client_defaults", "005_client_owner", "006_execution_grants",
+    ]
+
+
+def test_owner_upgrade_preserves_credentials_and_leaves_legacy_clients_unassigned(tmp_path):
+    migration = next(entry for entry in migrate.load_manifest() if entry.logical_id == "005_client_owner")
+    path = tmp_path / "legacy-owner.sqlite"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE waygate_clients (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, enabled BOOLEAN NOT NULL,
+                private_key_encrypted TEXT NOT NULL, preshared_key_encrypted TEXT,
+                tunnel_ip TEXT NOT NULL, allowed_ips TEXT
+            );
+            INSERT INTO waygate_clients VALUES
+                ('legacy', 'project-a', 1, 'private-ciphertext', 'psk-ciphertext', '10.8.0.2', '["10.8.0.0/24"]'),
+                ('disabled', 'project-a', 0, 'other-ciphertext', NULL, '10.8.0.3', NULL);
+            """
+        )
+        before = connection.execute("SELECT * FROM waygate_clients ORDER BY id").fetchall()
+        for statement in migrate._statements(migrate.MIGRATIONS / migration.relative_path):
+            connection.execute(statement.replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN"))
+        connection.commit()
+    # Close and reopen the persistent database, not merely the same cursor.
+    with closing(sqlite3.connect(path)) as connection:
+        after = connection.execute("SELECT * FROM waygate_clients ORDER BY id").fetchall()
+        assert [row[:-1] for row in after] == before
+        assert all(row[-1] is None for row in after)
+        connection.execute("UPDATE waygate_clients SET owner_user_id = 'user-a' WHERE id = 'legacy'")
+        assert connection.execute(
+            "SELECT owner_user_id, private_key_encrypted, preshared_key_encrypted FROM waygate_clients WHERE id = 'legacy'"
+        ).fetchone() == ("user-a", "private-ciphertext", "psk-ciphertext")

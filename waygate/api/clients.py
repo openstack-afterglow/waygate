@@ -1,4 +1,4 @@
-"""Waygate 클라이언트(peer) 관리 API — 사용자 JWT 인증 + 서버 소유권 검증."""
+"""Native client metadata, administration and assigned-user profile downloads."""
 
 import logging
 import uuid
@@ -6,7 +6,15 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from waygate.auth import require_token
+from waygate.auth import (
+    has_capability,
+    require_clients_admin,
+    require_clients_editor,
+    require_clients_update,
+    require_connect,
+    require_inventory,
+    validate_client_owner,
+)
 from waygate.db import is_db_available
 from waygate.models.schemas import (
     WaygateClientCreateRequest,
@@ -15,7 +23,7 @@ from waygate.models.schemas import (
     WaygateClientUpdateRequest,
 )
 from waygate.services import k3s_crypto, waygate_agent_auth, waygate_config, waygate_db, waygate_ipam, waygate_keys
-from waygate.services.store import WaygateClientConflictError
+from waygate.services.store import WaygateClientConflictError, WaygateClientOwnerConflictError
 
 router = APIRouter()
 _logger = logging.getLogger(__name__)
@@ -76,12 +84,12 @@ def _merge_client_status(client: dict, status_result: dict | None) -> WaygateCli
 async def create_waygate_client(
     server_id: str,
     body: WaygateClientCreateRequest,
-    token_info: dict = Depends(require_token),
+    response: Response,
+    token_info: dict = Depends(require_clients_editor),
 ):
-    """클라이언트 발급. 응답에는 이번 1회만이 아니라 매 조회 시 재구성 가능한 tunnel_conf 를 포함한다.
+    """Issue metadata; plaintext tunnel_conf requires current connect authority on an enabled owned profile.
 
-    private key는 AES-GCM 암호화 저장하므로, GET /{server_id}/clients/{cid}/config 로
-    언제든 동일한 .conf 를 재다운로드할 수 있다(k3s kubeconfig 다운로드 패턴과 동일).
+    Profiles created for another member or left unassigned never expose their private key/PSK to the creator.
     """
     _require_db()
     project_id = token_info["project_id"]
@@ -90,6 +98,9 @@ async def create_waygate_client(
         raise HTTPException(status_code=409, detail="Waygate 서버가 ACTIVE 상태가 아닙니다 (에이전트 register 대기 중)")
     if not server.get("server_public_key"):
         raise HTTPException(status_code=409, detail="Waygate 서버 공개키가 아직 등록되지 않았습니다")
+
+    owner_user_id = body.owner_user_id if "owner_user_id" in body.model_fields_set else token_info["user_id"]
+    await validate_client_owner(project_id, owner_user_id)
 
     private_key, public_key = waygate_keys.generate_keypair()
 
@@ -104,6 +115,7 @@ async def create_waygate_client(
     allowed_ips = body.allowed_ips or [server["tunnel_cidr"]]
     data = {
         "name": body.name,
+        "owner_user_id": owner_user_id,
         "enabled": True,
         "public_key": public_key,
         "private_key_encrypted": private_key_encrypted,
@@ -136,27 +148,34 @@ async def create_waygate_client(
     client = await waygate_db.get_client(server_id, project_id, client_id)
     if client is None:
         raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
-    nat_cidrs = await waygate_db.list_active_attachment_cidrs(server_id)
-    tunnel_conf = waygate_config.render_client_conf(
-        private_key=private_key,
-        tunnel_ip=client["tunnel_ip"],
-        dns=client.get("dns"),
-        mtu=client.get("mtu"),
-        persistent_keepalive=client.get("persistent_keepalive", 25),
-        preshared_key=preshared_key,
-        server_public_key=server["server_public_key"],
-        endpoint_ip=server["endpoint_ip"] or "",
-        listen_port=server["listen_port"],
-        allowed_ips=client.get("allowed_ips") or [server["tunnel_cidr"]],
-        nat_cidrs=nat_cidrs,
-    )
+    tunnel_conf = None
+    if (
+        has_capability(token_info, "waygate-connect_user")
+        and client.get("owner_user_id") == token_info["user_id"]
+        and client.get("enabled")
+    ):
+        nat_cidrs = await waygate_db.list_active_attachment_cidrs(server_id)
+        tunnel_conf = waygate_config.render_client_conf(
+            private_key=private_key,
+            tunnel_ip=client["tunnel_ip"],
+            dns=client.get("dns"),
+            mtu=client.get("mtu"),
+            persistent_keepalive=client.get("persistent_keepalive", 25),
+            preshared_key=preshared_key,
+            server_public_key=server["server_public_key"],
+            endpoint_ip=server["endpoint_ip"] or "",
+            listen_port=server["listen_port"],
+            allowed_ips=client.get("allowed_ips") or [server["tunnel_cidr"]],
+            nat_cidrs=nat_cidrs,
+        )
 
     info = _merge_client_status(client, await waygate_agent_auth.get_status_result(server_id))
+    response.headers["Cache-Control"] = "no-store"
     return WaygateClientCreateResponse(**info.model_dump(), tunnel_conf=tunnel_conf)
 
 
 @router.get("/{server_id}/clients", response_model=list[WaygateClientInfo])
-async def list_waygate_clients(server_id: str, token_info: dict = Depends(require_token)):
+async def list_waygate_clients(server_id: str, token_info: dict = Depends(require_inventory)):
     _require_db()
     project_id = token_info["project_id"]
     await _get_owned_server(project_id, server_id)
@@ -170,19 +189,34 @@ async def update_waygate_client(
     server_id: str,
     client_id: str,
     body: WaygateClientUpdateRequest,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_clients_update),
 ):
     _require_db()
     project_id = token_info["project_id"]
+    # Any enabled transition is revocation/reactivation of credential access and requires clients admin.
+    editing_fields = body.model_fields_set - {"enabled"}
+    if editing_fields and not has_capability(token_info, "waygate-clients_editor"):
+        raise HTTPException(status_code=403, detail="Client editing requires Waygate clients editor")
+    if "enabled" in body.model_fields_set and not has_capability(token_info, "waygate-clients_admin"):
+        raise HTTPException(status_code=403, detail="Client enable/revoke requires Waygate clients admin")
     await _get_owned_server(project_id, server_id)
-    updated = await waygate_db.update_client(server_id, project_id, client_id, **body.model_dump(exclude_unset=True))
+    if "owner_user_id" in body.model_fields_set:
+        if body.owner_user_id is None:
+            raise HTTPException(status_code=422, detail="An assigned client owner cannot be cleared; delete the profile")
+        await validate_client_owner(project_id, body.owner_user_id)
+    try:
+        updated = await waygate_db.update_client(server_id, project_id, client_id, **body.model_dump(exclude_unset=True))
+    except WaygateClientOwnerConflictError as exc:
+        raise HTTPException(
+            status_code=409, detail="Only unassigned profiles can be assigned; a known owner cannot be transferred",
+        ) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
     return _merge_client_status(updated, await waygate_agent_auth.get_status_result(server_id))
 
 
 @router.delete("/{server_id}/clients/{client_id}", status_code=204)
-async def delete_waygate_client(server_id: str, client_id: str, token_info: dict = Depends(require_token)):
+async def delete_waygate_client(server_id: str, client_id: str, token_info: dict = Depends(require_clients_admin)):
     _require_db()
     project_id = token_info["project_id"]
     await _get_owned_server(project_id, server_id)
@@ -192,7 +226,7 @@ async def delete_waygate_client(server_id: str, client_id: str, token_info: dict
 
 
 @router.get("/{server_id}/clients/{client_id}/config")
-async def download_vpn_client_config(server_id: str, client_id: str, token_info: dict = Depends(require_token)):
+async def download_vpn_client_config(server_id: str, client_id: str, token_info: dict = Depends(require_connect)):
     """`.conf` 파일 다운로드. 매 호출마다 복호화 후 재렌더 (k3s kubeconfig 다운로드 패턴 미러)."""
     _require_db()
     project_id = token_info["project_id"]
@@ -200,6 +234,10 @@ async def download_vpn_client_config(server_id: str, client_id: str, token_info:
     client = await waygate_db.get_client(server_id, project_id, client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
+    # Private profiles stay private even for service/system administrators.
+    owner = client.get("owner_user_id")
+    if not owner or owner != token_info.get("user_id") or not client.get("enabled"):
+        raise HTTPException(status_code=403, detail="Only your assigned enabled client profile may be downloaded")
     if not server.get("server_public_key") or not server.get("endpoint_ip"):
         raise HTTPException(status_code=409, detail="Waygate 서버가 아직 준비되지 않았습니다")
 
@@ -234,5 +272,8 @@ async def download_vpn_client_config(server_id: str, client_id: str, token_info:
     return Response(
         content=tunnel_conf,
         media_type="text/plain",
-        headers={"Content-Disposition": f'attachment; filename="{client["name"]}.conf"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{client["name"]}.conf"',
+            "Cache-Control": "no-store",
+        },
     )

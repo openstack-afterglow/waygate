@@ -8,10 +8,10 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from waygate.auth import require_token
+from waygate.auth import require_inventory, require_routing_admin
 from waygate.db import is_db_available
 from waygate.models.schemas import WaygateNetworkAttachCreateRequest, WaygateNetworkAttachmentInfo
-from waygate.services import waygate_db, waygate_network
+from waygate.services import execution, waygate_db, waygate_network
 from waygate.services.network import WaygateNetworkError
 
 router = APIRouter()
@@ -40,21 +40,28 @@ def _to_info(att: dict) -> WaygateNetworkAttachmentInfo:
 async def attach_waygate_network(
     server_id: str,
     body: WaygateNetworkAttachCreateRequest,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_routing_admin),
 ):
     """Waygate 서버에 테넌트 네트워크를 추가 연결(멀티 NIC + SNAT). 서버가 ACTIVE 여야 한다."""
     _require_db()
     project_id = token_info["project_id"]
     server = await _get_owned_server(project_id, server_id)
     try:
-        att = await waygate_network.attach_network(project_id, server, body.network_id, body.subnet_id, body.nat_mode)
+        async with execution.admitted_operation(token_info, server_id, "attach") as (_grant, conn):
+            att = await waygate_network.attach_network(
+                project_id, server, body.network_id, body.subnet_id, body.nat_mode, conn=conn
+            )
+    except execution.ExecutionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except execution.ExecutionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except WaygateNetworkError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e
     return _to_info(att)
 
 
 @router.get("/{server_id}/networks", response_model=list[WaygateNetworkAttachmentInfo])
-async def list_waygate_networks(server_id: str, token_info: dict = Depends(require_token)):
+async def list_waygate_networks(server_id: str, token_info: dict = Depends(require_inventory)):
     _require_db()
     project_id = token_info["project_id"]
     await _get_owned_server(project_id, server_id)
@@ -63,11 +70,16 @@ async def list_waygate_networks(server_id: str, token_info: dict = Depends(requi
 
 
 @router.delete("/{server_id}/networks/{attachment_id}", status_code=204)
-async def detach_waygate_network(server_id: str, attachment_id: int, token_info: dict = Depends(require_token)):
+async def detach_waygate_network(server_id: str, attachment_id: int, token_info: dict = Depends(require_routing_admin)):
     _require_db()
     project_id = token_info["project_id"]
     server = await _get_owned_server(project_id, server_id)
     try:
-        await waygate_network.detach_network(project_id, server, attachment_id)
+        async with execution.admitted_operation(token_info, server_id, "detach") as (_grant, conn):
+            await waygate_network.detach_network(project_id, server, attachment_id, conn=conn)
+    except execution.ExecutionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except execution.ExecutionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except WaygateNetworkError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e

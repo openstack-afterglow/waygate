@@ -41,6 +41,7 @@ def _client_record(**overrides) -> dict:
         "project_id": "test-project-123",
         "name": "laptop",
         "enabled": True,
+        "owner_user_id": "test-user-123",
         "public_key": "client-pub-key-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         "private_key_encrypted": "encrypted-blob",
         "tunnel_ip": "10.8.0.2",
@@ -68,6 +69,12 @@ def _db_available(monkeypatch):
     monkeypatch.setattr("waygate.api.clients.is_db_available", lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _enabled_project_owner(monkeypatch):
+    # These API regressions isolate storage/rendering, not Keystone membership.
+    monkeypatch.setattr("waygate.api.clients.validate_client_owner", AsyncMock())
+
+
 @pytest.fixture
 async def api_client():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -82,6 +89,11 @@ def _override_token_info(project_id: str = "test-project-123"):
             "project_id": project_id,
             "user_id": "test-user-123",
             "username": "testuser",
+            "roles": [
+                "member", "waygate-inventory_reader", "waygate-connect_user",
+                "waygate-clients_editor", "waygate-clients_admin",
+            ],
+            "is_system_admin": False,
         }
 
     app.dependency_overrides[require_token] = _fn
@@ -814,6 +826,7 @@ def _make_client_row(**overrides) -> SimpleNamespace:
         id="client-1",
         server_id="server-1",
         project_id="test-project-123",
+        owner_user_id=None,
         name="laptop",
         enabled=True,
         public_key="pub",

@@ -1,12 +1,11 @@
 """Waygate 서버 관리 API — 사용자 JWT 인증 + project_id 소유권 검증."""
 
-import asyncio
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from waygate.auth import require_token
+from waygate.auth import require_gateways_admin, require_gateways_editor, require_inventory
 from waygate.config import get_settings
 from waygate.db import is_db_available
 from waygate.models.schemas import (
@@ -15,7 +14,7 @@ from waygate.models.schemas import (
     WaygateServerInfo,
     WaygateServerUpdateRequest,
 )
-from waygate.services import waygate_agent_auth, waygate_db, waygate_jobs
+from waygate.services import execution, waygate_agent_auth, waygate_db, waygate_jobs
 from waygate.services.store import WaygateServerInactiveError
 
 router = APIRouter()
@@ -29,7 +28,10 @@ def _require_db() -> None:
 
 async def _merge_status(server: dict) -> WaygateServerInfo:
     """DB 레코드 + Redis 최신 상태(에이전트 마지막 보고)를 병합해 WaygateServerInfo를 만든다."""
-    info = WaygateServerInfo(**{k: v for k, v in server.items() if k in WaygateServerInfo.model_fields})
+    # Worker/OpenStack exception text is not safe tenant metadata at any grade.
+    info = WaygateServerInfo(
+        **{k: v for k, v in server.items() if k in WaygateServerInfo.model_fields and k != "status_reason"}
+    )
     status_result = await waygate_agent_auth.get_status_result(server["id"])
     if status_result:
         info.last_status_reported_at = status_result.get("_stored_at")
@@ -43,53 +45,52 @@ async def _merge_status(server: dict) -> WaygateServerInfo:
 @router.post("/", status_code=201, response_model=WaygateServerInfo, include_in_schema=False)
 async def create_waygate_server(
     body: WaygateServerCreateRequest,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_gateways_editor),
 ):
     """Waygate 서버 프로비저닝 요청 — CREATING 상태로 즉시 응답, 백그라운드에서 부팅."""
     _require_db()
     settings = get_settings()
     project_id = token_info["project_id"]
-    from waygate.auth import get_admin_connection_for_project
     from waygate.services.resource_policies import get_policy_snapshot, resolve_policy_snapshot
 
-    conn = await asyncio.to_thread(get_admin_connection_for_project, project_id)
-    try:
-        snapshot = await resolve_policy_snapshot(
-            conn=conn,
-            keys=("waygate.provider_network", "waygate.image", "waygate.flavor"),
-        )
-        floating_network = (await get_policy_snapshot(("waygate.floating_network",)))["waygate.floating_network"]
-        if floating_network is not None:
-            snapshot["waygate.floating_network"] = floating_network
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Waygate resource policy is unavailable: {exc}") from exc
-    finally:
-        await asyncio.to_thread(conn.close)
-
     server_id = str(uuid.uuid4())
-
-    await waygate_jobs.enqueue_provision_job(
-        project_id,
-        server_id,
-        {
-            "name": body.name,
-            "status": "CREATING",
-            "listen_port": settings.waygate_default_listen_port,
-            "tunnel_cidr": settings.waygate_default_tunnel_cidr,
-            "dns": body.dns,
-            "persistent_keepalive": body.persistent_keepalive,
-            "flavor_id": snapshot["waygate.flavor"]["id"],
-            "image_id": snapshot["waygate.image"]["id"],
-            "provider_network_id": snapshot["waygate.provider_network"]["id"],
-            "floating_network_id": (snapshot.get("waygate.floating_network") or {}).get("id"),
-            "resource_policy_snapshot": snapshot,
-            "agent_install_mode": settings.waygate_agent_install_mode,
-            "created_by_user_id": token_info.get("user_id"),
-            "created_by_username": token_info.get("username"),
-        },
-        user_id=token_info.get("user_id"),
-        username=token_info.get("username"),
-    )
+    try:
+        async with execution.admitted_operation(token_info, server_id, "provision") as (grant, conn):
+            snapshot = await resolve_policy_snapshot(
+                conn=conn,
+                keys=("waygate.provider_network", "waygate.image", "waygate.flavor"),
+            )
+            floating_network = (await get_policy_snapshot(("waygate.floating_network",)))["waygate.floating_network"]
+            if floating_network is not None:
+                snapshot["waygate.floating_network"] = floating_network
+            await waygate_jobs.enqueue_provision_job(
+                project_id,
+                server_id,
+                {
+                    "name": body.name,
+                    "status": "CREATING",
+                    "listen_port": settings.waygate_default_listen_port,
+                    "tunnel_cidr": settings.waygate_default_tunnel_cidr,
+                    "dns": body.dns,
+                    "persistent_keepalive": body.persistent_keepalive,
+                    "flavor_id": snapshot["waygate.flavor"]["id"],
+                    "image_id": snapshot["waygate.image"]["id"],
+                    "provider_network_id": snapshot["waygate.provider_network"]["id"],
+                    "floating_network_id": (snapshot.get("waygate.floating_network") or {}).get("id"),
+                    "resource_policy_snapshot": snapshot,
+                    "agent_install_mode": settings.waygate_agent_install_mode,
+                    "created_by_user_id": token_info.get("user_id"),
+                    "created_by_username": token_info.get("username"),
+                },
+                user_id=token_info.get("user_id"),
+                username=token_info.get("username"),
+                execution_grant_id=grant.id,
+            )
+    except execution.ExecutionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except Exception as exc:
+        _logger.warning("gateway stage=admission status=unavailable error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Waygate execution or resource policy is unavailable") from None
 
     server = await waygate_db.get_server(project_id, server_id)
     return await _merge_status(server)
@@ -97,7 +98,7 @@ async def create_waygate_server(
 
 @router.get("", response_model=list[WaygateServerInfo])
 @router.get("/", response_model=list[WaygateServerInfo], include_in_schema=False)
-async def list_waygate_servers(token_info: dict = Depends(require_token)):
+async def list_waygate_servers(token_info: dict = Depends(require_inventory)):
     _require_db()
     project_id = token_info["project_id"]
     servers = await waygate_db.list_servers(project_id)
@@ -105,7 +106,7 @@ async def list_waygate_servers(token_info: dict = Depends(require_token)):
 
 
 @router.get("/{server_id}", response_model=WaygateServerInfo)
-async def get_waygate_server(server_id: str, token_info: dict = Depends(require_token)):
+async def get_waygate_server(server_id: str, token_info: dict = Depends(require_inventory)):
     _require_db()
     project_id = token_info["project_id"]
     server = await waygate_db.get_server(project_id, server_id)
@@ -119,7 +120,7 @@ async def get_waygate_server(server_id: str, token_info: dict = Depends(require_
 async def update_waygate_server(
     server_id: str,
     body: WaygateServerUpdateRequest,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_gateways_editor),
 ):
     _require_db()
     try:
@@ -134,7 +135,7 @@ async def update_waygate_server(
 
 
 @router.post("/{server_id}/agent-token/rotate", status_code=202, response_model=WaygateServerInfo)
-async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(require_token)):
+async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(require_gateways_admin)):
     """Stage an agent credential handoff without exposing the token to the tenant."""
     _require_db()
     project_id = token_info["project_id"]
@@ -152,15 +153,24 @@ async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(
 
 
 @router.delete("/{server_id}", status_code=202, response_model=WaygateServerDeleteResponse)
-async def delete_waygate_server_endpoint(server_id: str, token_info: dict = Depends(require_token)):
+async def delete_waygate_server_endpoint(server_id: str, token_info: dict = Depends(require_gateways_admin)):
     _require_db()
     project_id = token_info["project_id"]
-    found = await waygate_jobs.enqueue_delete_job(
-        project_id,
-        server_id,
-        user_id=token_info.get("user_id"),
-        username=token_info.get("username"),
-    )
+    if not await waygate_db.get_server(project_id, server_id):
+        raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
+    try:
+        async with execution.admitted_operation(token_info, server_id, "delete") as (grant, _conn):
+            found = await waygate_jobs.enqueue_delete_job(
+                project_id,
+                server_id,
+                user_id=token_info.get("user_id"),
+                username=token_info.get("username"),
+                execution_grant_id=grant.id,
+            )
+    except execution.ExecutionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except execution.ExecutionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     if not found:
         raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
     return {"ok": True, "status": "DELETING"}
