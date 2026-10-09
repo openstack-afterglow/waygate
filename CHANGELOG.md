@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3 — 2026-10-09 (candidate; publication and production acceptance pending)
+
+- Use exact direct user system-all assignment lookup for the uniquely resolved global Keystone admin role; omit `effective`, retain exact identity/role/scope filtering and fail-closed errors. Effective project assignments and the role DAG are unchanged. Group-only and implied system grants are not expanded by this verification.
+- Permit explicit profile ownership by an enabled current project member with platform roles only when independently verified direct system admin. Membership and role-graph safety ceilings still run first; no automatic ownership, transfer, foreign-profile download or platform-role delegation is added.
+- Local Python 3.13.12 gates: focused native/owner selectors 266 passed / 2 opt-in MariaDB skips; full four-worker service suite 686 passed / 3 skips; unchanged SDK 44 passed; root/SDK Ruff passed. SDK emits the existing openstacksdk service_type deprecation warning. Exact-SHA CI, new immutable image/wheel publication and runtime replacement remain separate gates.
+- Separate reported prior runtime hotpatch/one approved owner PATCH HTTP 200 from immutable published `v0.3.2` (`7da6a270`). That release's images/wheel predate this fix and are not overwritten; the narrow live evidence is recorded in release/deployment architecture, not promoted to full rollout or data-plane proof.
+
+
 ## 0.3.2 — 2026-10-08 (service 0.3.2 / SDK 0.2.0; not deployed)
 
 - Root service distribution/runtime, root `uv.lock` and packaged Kolla `waygate_image_tag` move together to `0.3.2`, the next patch after published `v0.3.1`; the independent SDK stays `0.2.0` (its existing `**attrs` forwarding carries `owner_user_id`, and its public API is unchanged). The root `dev` extra adds `aiosqlite>=0.20.0` (lock `0.22.1`) for the persistent SQLite synthetic-auth smoke only; service/runtime image dependencies are unchanged. Kolla `waygate_source_version` remains the stale immutable pin `1c59b5e…`; source-mode operators must select the reviewed release commit.
@@ -7,7 +15,7 @@
 
 **Tagged publication (2026-10-08):** Immutable [`v0.3.2`](https://github.com/openstack-afterglow/waygate/releases/tag/v0.3.2) targets `7da6a2701d439bee6766b575719638525562cd9c`. Dev image run [37725179893](https://github.com/openstack-afterglow/waygate/actions/runs/37725179893) and tag image run [37725387427](https://github.com/openstack-afterglow/waygate/actions/runs/37725387427) succeeded. The release wheel SHA-256 is `536d241ac9a8e0c6f33cf2bbf259db66db2ebbef0db4e2e9b8472064b9173b4e`. Published API/worker digests are `sha256:d4173c4e7c70695a31aa45f80ff7fb1d97593e4ab62f58716216ef4da16d993b` and `sha256:93853bac8ab2dba0e16ec1e8872f206f56f14e566d906337a4816b5068aa2efc`, revision `7da6a270`, with equal `latest` aliases. These registry images are amd64-only; both actual image probes reported x86_64, 0.3.2 and uid 1000. Earlier local dual-architecture HTTP/MariaDB proof is a separate receipt.
 
-**Production hold:** DMS Lab remains on 0.3.1 (`37a57fa0`). The user approved role-preset creation but reserved project/user grade assignments for separate review. Presets alone do not grant Waygate access, so 0.3.2 cutover is held. No operator package/pin update, drain, migration 005/006 or Kolla rollout was performed for this release. Legacy client-owner assignment and Trust/cloud/Cinder qualification remain explicit cutover prerequisites.
+**Production hold recorded at publication:** DMS Lab then remained on 0.3.1 (`37a57fa0`). The user approved role-preset creation but reserved project/user grade assignments for separate review. Presets alone did not grant Waygate access, so 0.3.2 cutover was held. No operator package/pin update, drain, migration 005/006 or Kolla rollout was performed for that release. This historical receipt does not describe an inspected current deployment or absorb the later reported hotpatch/owner PATCH. Legacy client-owner assignment and Trust/cloud/Cinder qualification remain explicit cutover prerequisites.
 
 ### Isolated tenant execution credentials
 

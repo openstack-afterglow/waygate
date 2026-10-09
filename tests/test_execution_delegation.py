@@ -6,6 +6,10 @@ impersonating trust-scoped tokens that require the trustor's current roles, and
 no tenant assignment for the service identity. The registered application, its
 real token dependencies, SQL store and durable worker run unchanged.
 
+Direct system-all admin assignments also exercise the installed SDK's HTTP
+decoder: an incompatible effective-system envelope must not hide a valid direct
+assignment, while project authority continues to use effective assignments.
+
 Set WAYGATE_DELEGATION_MARIADB_URL to a disposable server's privileged DSN to run
 the same cases on a per-test database built by the packaged migration ledger.
 """
@@ -26,15 +30,16 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from keystoneclient.v3.role_assignments import RoleAssignment, RoleAssignmentManager
 from sqlalchemy import make_url, select, text, update
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from waygate import db
+from waygate import auth, db
 from waygate.config import get_settings
 from waygate.main import app
-from waygate.models.orm import ResourcePolicy, WaygateExecutionGrant, WaygateJob, WaygateServer
+from waygate.models.orm import ResourcePolicy, WaygateClient, WaygateExecutionGrant, WaygateJob, WaygateServer
 from waygate.scripts import migrate
-from waygate.services import openstack_ops, waygate_jobs
+from waygate.services import k3s_crypto, openstack_ops, waygate_jobs, waygate_keys
 
 pytestmark = pytest.mark.asyncio
 
@@ -79,6 +84,10 @@ class SyntheticCloud:
             ("user-b", "project-a"): set(ADMIN),
             (SERVICE_USER, SERVICE_PROJECT): {"admin"},
         }
+        self.system_assignments: list[dict] = []
+        self.role_assignment_queries: list[dict] = []
+        self.incompatible_effective_system = False
+        self.fail_system_assignments = False
         self.tokens: dict[str, dict] = {}
         self.trusts: dict[str, dict] = {}
         self.auth_requests: list[dict] = []
@@ -379,13 +388,28 @@ def _handler(cloud: SyntheticCloud):
                     "links": {"next": None},
                 }
             if path == "/v3/role_assignments":
+                cloud.role_assignment_queries.append(query)
+                if query.get("scope.system"):
+                    if cloud.fail_system_assignments:
+                        return 503, {"error": {"code": 503, "message": "synthetic system directory outage"}}
+                    if cloud.incompatible_effective_system and "effective" in query:
+                        # HTTP succeeds, but python-keystoneclient's collection decoder
+                        # cannot consume this effective endpoint's incompatible envelope.
+                        return 200, {"assignments": cloud.system_assignments, "links": {"next": None}}
+                    # Return even unexpected rows so the consumer must verify all
+                    # three filters, not trust that a server honored its query.
+                    return 200, {"role_assignments": cloud.system_assignments, "links": {"next": None}}
                 user, project = query.get("user.id", [""])[0], query.get("scope.project.id", [""])[0]
                 rows = (
                     []
                     if not project
                     else [
                         {"user": {"id": user}, "scope": {"project": {"id": project}}, "role": {"id": "role-" + name}}
-                        for name in sorted(cloud.effective(user, project))
+                        for name in sorted(
+                            cloud.effective(user, project)
+                            if "effective" in query
+                            else cloud.assignments.get((user, project), set())
+                        )
                     ]
                 )
                 return 200, {"role_assignments": rows, "links": {"next": None}}
@@ -652,6 +676,196 @@ def _trust_users(cloud: SyntheticCloud, start: int = 0) -> set[tuple[str, str | 
         (record["user"], record["trust"] and record["trust"]["id"])
         for _method, _path, record in cloud.cloud_requests[start:]
     }
+
+
+def _system_admin_row(user="user-a") -> dict:
+    return {"user": {"id": user}, "role": {"id": "role-admin"}, "scope": {"system": {"all": True}}}
+
+
+def _assert_assignment_queries(cloud, start=0):
+    queries = cloud.role_assignment_queries[start:]
+    system = [query for query in queries if "scope.system" in query]
+    project = [query for query in queries if "scope.project.id" in query]
+    assert system and project
+    assert len(system) + len(project) == len(queries)
+    for query in system:
+        assert query == {
+            "user.id": query["user.id"], "role.id": ["role-admin"], "scope.system": ["all"],
+        }
+        assert query["user.id"] in (["user-a"], ["user-b"])
+    for query in project:
+        assert query == {
+            "user.id": query["user.id"], "scope.project.id": ["project-a"], "effective": ["True"],
+        }
+        assert query["user.id"] in (["user-a"], ["user-b"])
+
+
+async def _seed_unassigned_profile():
+    private_key, public_key = waygate_keys.generate_keypair()
+    async with db.get_session_factory()() as session, session.begin():
+        session.add(WaygateServer(
+            id="owner-server", project_id="project-a", name="owner-gateway", status="ACTIVE",
+            endpoint_ip="203.0.113.10", server_public_key=public_key,
+        ))
+        await session.flush()
+        session.add(WaygateClient(
+            id="unassigned", server_id="owner-server", project_id="project-a", name="legacy",
+            owner_user_id=None, enabled=True, public_key=public_key, tunnel_ip="10.8.0.2",
+            private_key_encrypted=k3s_crypto.encrypt_wg_client_key(private_key), allowed_ips=["10.8.0.0/24"],
+        ))
+    return private_key
+
+
+async def test_direct_system_admin_owner_patch_survives_installed_sdk_effective_decoder_failure(native):
+    cloud = native.cloud
+    cloud.assignments["user-a", "project-a"] = {"admin"}
+    cloud.system_assignments = [_system_admin_row()]
+    cloud.incompatible_effective_system = True
+    private_key = await _seed_unassigned_profile()
+    path = "/v1/servers/owner-server/clients/unassigned"
+
+    # This is an installed python-keystoneclient manager backed by a real
+    # keystoneauth1 session, not a replacement directory/decoder object.
+    sdk = auth._get_admin_ks_client()
+    assert type(sdk.role_assignments) is RoleAssignmentManager
+    with pytest.raises(KeyError, match="role_assignments"):
+        await asyncio.to_thread(
+            sdk.role_assignments.list, user="user-a", role="role-admin", system="all", effective=True,
+        )
+    assert cloud.role_assignment_queries[-1] == {
+        "user.id": ["user-a"], "role.id": ["role-admin"], "scope.system": ["all"], "effective": ["True"],
+    }
+    [decoded] = await asyncio.to_thread(
+        sdk.role_assignments.list, user="user-a", role="role-admin", system="all",
+    )
+    assert type(decoded) is RoleAssignment
+    assert decoded.to_dict() == _system_admin_row()
+
+    start = len(cloud.role_assignment_queries)
+    headers = native.headers("user-a")
+    assigned = await native.client.patch(path, json={"owner_user_id": "user-a"}, headers=headers)
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["owner_user_id"] == "user-a"
+    [stored] = await _rows(WaygateClient, id="unassigned")
+    assert stored.owner_user_id == "user-a"
+    assert k3s_crypto.decrypt_wg_client_key(stored.private_key_encrypted) == private_key
+    assert private_key not in stored.private_key_encrypted
+    downloaded = await native.client.get(path + "/config", headers=headers)
+    assert downloaded.status_code == 200, downloaded.text
+    assert "PrivateKey = " + private_key in downloaded.text
+    assert downloaded.headers["cache-control"] == "no-store"
+    _assert_assignment_queries(cloud, start)
+    assert all(query["user.id"] == ["user-a"] for query in cloud.role_assignment_queries[start:])
+    assert sum("scope.system" in query for query in cloud.role_assignment_queries[start:]) >= 3
+
+    # A system administrator is still not allowed to transfer or clear a known
+    # owner, or download someone else's private profile.
+    transferred = await native.client.patch(path, json={"owner_user_id": "user-b"}, headers=headers)
+    assert transferred.status_code == 409, transferred.text
+    cleared = await native.client.patch(path, json={"owner_user_id": None}, headers=headers)
+    assert cleared.status_code == 422, cleared.text
+    cloud.system_assignments.append(_system_admin_row("user-b"))
+    foreign = await native.client.get(path + "/config", headers=native.headers("user-b"))
+    assert foreign.status_code == 403, foreign.text
+    assert (await _rows(WaygateClient, id="unassigned"))[0].owner_user_id == "user-a"
+    assert cloud.cloud_requests == [] and cloud.trusts == {}
+    assert await _rows(WaygateExecutionGrant) == [] and await _rows(WaygateJob) == []
+
+
+@pytest.mark.parametrize("failure", [
+    "wrong-role", "wrong-subject", "project-scope", "domain-scope", "false-system",
+    "nonboolean-system", "group-system", "missing", "outage",
+])
+async def test_direct_system_admin_owner_patch_rejects_nonmatching_rows_and_outage(native, failure):
+    cloud = native.cloud
+    cloud.assignments["user-a", "project-a"] = {"admin"}
+    cloud.assignments["user-b", "project-a"] = {"member", "waygate-clients_editor"}
+    row = _system_admin_row()
+    if failure == "wrong-role":
+        row["role"] = {"id": "role-member"}
+    elif failure == "wrong-subject":
+        row["user"] = {"id": "another-user"}
+    elif failure == "project-scope":
+        row["scope"] = {"project": {"id": "project-a"}}
+    elif failure == "domain-scope":
+        row["scope"] = {"domain": {"id": "default"}}
+    elif failure == "false-system":
+        row["scope"] = {"system": {"all": False}}
+    elif failure == "nonboolean-system":
+        row["scope"] = {"system": {"all": "true"}}
+    elif failure == "group-system":
+        del row["user"]
+        row["group"] = {"id": "system-admins"}
+    cloud.system_assignments = [] if failure == "missing" else [row]
+    cloud.fail_system_assignments = failure == "outage"
+    await _seed_unassigned_profile()
+    path = "/v1/servers/owner-server/clients/unassigned"
+
+    # The editor caller is independently authorized; denial must come from
+    # validation of the proposed platform-role owner's current direct grant.
+    response = await native.client.patch(
+        path, json={"owner_user_id": "user-a"}, headers=native.headers("user-b"),
+    )
+    assert response.status_code == 422, response.text
+    [stored] = await _rows(WaygateClient, id="unassigned")
+    assert stored.owner_user_id is None
+    assert stored.name == "legacy" and stored.enabled is True
+    _assert_assignment_queries(cloud)
+    assert {
+        "user.id": ["user-a"], "role.id": ["role-admin"], "scope.system": ["all"],
+    } in cloud.role_assignment_queries
+    denied = await native.client.get(path + "/config", headers=native.headers("user-a"))
+    assert denied.status_code == 403, denied.text
+    assert cloud.cloud_requests == [] and cloud.trusts == {}
+    assert await _rows(WaygateExecutionGrant) == [] and await _rows(WaygateJob) == []
+
+
+async def test_direct_system_admin_execution_still_delegates_only_member(native):
+    cloud = native.cloud
+    cloud.assignments["user-a", "project-a"] = {"admin"}
+    cloud.system_assignments = [_system_admin_row()]
+    cloud.incompatible_effective_system = True
+    server_id = await _create(native)
+    [trust] = cloud.trusts.values()
+    assert trust["roles"] == ["member"]
+    assert trust["impersonation"] is True
+    assert (trust["trustor_user_id"], trust["trustee_user_id"], trust["project_id"]) == (
+        "user-a", SERVICE_USER, "project-a",
+    )
+    [grant] = await _rows(WaygateExecutionGrant)
+    assert grant.role_id == "role-member"
+    assert (await _rows(WaygateJob, server_id=server_id))[0].execution_grant_id == grant.id
+    assert cloud.cloud_requests
+    assert _trust_users(cloud) == {("user-a", trust["id"])}
+    assert all(record["roles"] == {"member", "reader"} for _, _, record in cloud.cloud_requests)
+    assert await waygate_jobs.process_one_job() is True
+    assert (await _rows(WaygateJob, server_id=server_id))[0].status == "completed"
+    assert (await _rows(WaygateExecutionGrant))[0].status == "revoked"
+    assert cloud.trust_deletes == [(trust["id"], SERVICE_USER)]
+    assert all(record["roles"] == {"member", "reader"} for _, _, record in cloud.cloud_requests)
+    _assert_assignment_queries(cloud)
+
+
+async def test_direct_system_admin_without_project_member_cannot_own_or_delegate(native):
+    cloud = native.cloud
+    cloud.assignments["user-a", "project-a"] = {"reader"}
+    cloud.assignments["user-b", "project-a"] = {"member", "waygate-clients_editor"}
+    cloud.system_assignments = [_system_admin_row()]
+    cloud.incompatible_effective_system = True
+    await _seed_unassigned_profile()
+    assigned = await native.client.patch(
+        "/v1/servers/owner-server/clients/unassigned", json={"owner_user_id": "user-a"},
+        headers=native.headers("user-b"),
+    )
+    assert assigned.status_code == 422, assigned.text
+    assert (await _rows(WaygateClient, id="unassigned"))[0].owner_user_id is None
+    admitted = await native.client.post("/v1/servers", json={"name": "denied"}, headers=native.headers("user-a"))
+    assert admitted.status_code == 403, admitted.text
+    assert [row.id for row in await _rows(WaygateServer)] == ["owner-server"]
+    assert await _rows(WaygateJob) == []
+    assert all(row.status != "active" for row in await _rows(WaygateExecutionGrant))
+    assert cloud.trusts == {} and cloud.cloud_requests == []
+    _assert_assignment_queries(cloud)
 
 
 async def test_tenant_cloud_io_uses_only_the_requesters_bounded_trust(native):

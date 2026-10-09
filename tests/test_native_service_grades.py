@@ -3,6 +3,9 @@
 The application is the registered main.app, with its real lifespan and SQL store.
 Only cloud discovery/admin directory data and Redis are synthetic: Keystone token
 validation itself talks HTTP to a local v3 endpoint, with no dependency override.
+
+System-admin owner exceptions require an independently verified direct system assignment;
+expanded system-group authority is not claimed by this synthetic directory harness.
 """
 
 from __future__ import annotations
@@ -118,15 +121,17 @@ def test_verified_system_admin_has_tenant_and_global_authority():
     ({"scope": {"system": {"all": True}}, "role": {"id": "other"}, "user": {"id": "user-a"}}, False),
     ({"scope": {"system": {"all": True}}, "role": {"id": "admin-id"}, "user": {"id": "other"}}, False),
     ({"scope": {"system": {"all": "true"}}, "role": {"id": "admin-id"}, "user": {"id": "user-a"}}, False),
+    ({"scope": {"domain": {"id": "domain-a"}}, "role": {"id": "admin-id"}, "user": {"id": "user-a"}}, False),
+    ({"scope": {"system": {"all": True}}, "role": {"id": "admin-id"}, "group": {"id": "group-a"}}, False),
     ({}, False),
 ])
-def test_system_admin_requires_exact_effective_system_assignment(monkeypatch, document, expected):
+def test_system_admin_requires_exact_direct_system_assignment(monkeypatch, document, expected):
     client = MagicMock()
     client.roles.list.return_value = [SimpleNamespace(name="admin", id="admin-id", domain_id=None)]
     client.role_assignments.list.return_value = [_assignment(document)]
     monkeypatch.setattr(auth, "_get_admin_ks_client", lambda: client)
     assert auth._is_system_admin("user-a") is expected
-    client.role_assignments.list.assert_called_once_with(user="user-a", role="admin-id", system="all", effective=True)
+    client.role_assignments.list.assert_called_once_with(user="user-a", role="admin-id", system="all")
 
 
 @pytest.mark.parametrize("roles", [
@@ -142,45 +147,127 @@ def test_system_admin_role_resolution_rejects_ambiguous_or_domain_roles(monkeypa
     client.role_assignments.list.assert_not_called()
 
 
-def _owner_directory(enabled=True, roles=("member",), project="project-a", identity="user-a"):
-    names = {"member", "reader", "admin", "manager"}
+def _owner_directory(enabled=True, roles=("member",), project="project-a", identity="user-a", system_assignments=()):
+    names = set(CAPABILITIES) | set(PARENTS) | {"member", "reader", "admin", "manager"}
     client = MagicMock()
     client.users.get.return_value = SimpleNamespace(id=identity, enabled=enabled)
-    client.roles.list.return_value = [
-        SimpleNamespace(to_dict=lambda name=name: {"id": "role-" + name, "name": name}) for name in sorted(names)
+    client.roles.list.side_effect = lambda **kwargs: [
+        SimpleNamespace(id="role-" + name, name=name, domain_id=None,
+                        to_dict=lambda name=name: {"id": "role-" + name, "name": name})
+        for name in sorted(names) if not kwargs.get("name") or name == kwargs["name"]
     ]
     client.inference_rules.list_inference_roles.return_value = []
-    client.role_assignments.list.side_effect = lambda **kwargs: [
-        _assignment({"user": {"id": kwargs["user"]}, "scope": {"project": {"id": kwargs["project"]}},
-                     "role": {"id": "role-" + role}})
-        for role in roles
-    ] if kwargs["project"] == project else []
+
+    def assignments(**kwargs):
+        if "system" in kwargs:
+            return [_assignment(document) for document in system_assignments]
+        return [
+            _assignment({"user": {"id": kwargs["user"]}, "scope": {"project": {"id": kwargs["project"]}},
+                         "role": {"id": "role-" + role}})
+            for role in roles
+        ] if kwargs["project"] == project else []
+
+    client.role_assignments.list.side_effect = assignments
     return client
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("system_admin", [False, True])
 @pytest.mark.parametrize("enabled,roles,project,expected", [
-    (True, ("member",), "project-a", True),
-    (False, ("member",), "project-a", False),
-    (None, ("member",), "project-a", False),
-    (1, ("member",), "project-a", False),
-    (True, ("reader",), "project-a", False),
-    (True, ("member", "admin"), "project-a", False),
-    (True, ("member",), "project-b", False),
+    (True, ("member",), "project-a", (True, True)),
+    (False, ("member",), "project-a", (False, False)),
+    (False, ("member", "admin"), "project-a", (False, False)),
+    (None, ("member",), "project-a", (False, False)),
+    (1, ("member",), "project-a", (False, False)),
+    (True, ("reader",), "project-a", (False, False)),
+    (True, ("member", "admin"), "project-a", (False, True)),
+    (True, ("member", "manager"), "project-a", (False, True)),
+    (True, ("member", "admin", "manager"), "project-a", (False, True)),
+    (True, ("admin",), "project-a", (False, False)),
+    (True, ("manager",), "project-a", (False, False)),
+    (True, (), "project-a", (False, False)),
+    (True, ("member",), "project-b", (False, False)),
+    (True, ("member", "admin"), "project-b", (False, False)),
 ])
-async def test_owner_requires_enabled_effective_native_member(monkeypatch, enabled, roles, project, expected):
-    client = _owner_directory(enabled=enabled, roles=roles, project=project)
+async def test_owner_requires_enabled_effective_native_member(monkeypatch, enabled, roles, project, expected, system_admin):
+    documents = [{"scope": {"system": {"all": True}}, "role": {"id": "role-admin"}, "user": {"id": "user-a"}}]
+    client = _owner_directory(enabled=enabled, roles=roles, project=project,
+                              system_assignments=documents if system_admin else [])
     monkeypatch.setattr(auth, "_get_admin_ks_client", lambda: client)
-    if expected:
+    if expected[system_admin]:
         await auth.validate_client_owner("project-a", "user-a")
     else:
         with pytest.raises(HTTPException) as error:
             await auth.validate_client_owner("project-a", "user-a")
         assert error.value.status_code == 422
     if enabled is True:
-        client.role_assignments.list.assert_called_once_with(user="user-a", project="project-a", effective=True)
+        client.role_assignments.list.assert_any_call(user="user-a", project="project-a", effective=True)
+        if "member" in roles and project == "project-a" and {"admin", "manager"}.intersection(roles):
+            client.role_assignments.list.assert_any_call(user="user-a", role="role-admin", system="all")
     else:
         client.role_assignments.list.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["admin", "manager"])
+@pytest.mark.parametrize("document", [
+    {"scope": {"project": {"id": "project-b"}}, "role": {"id": "role-admin"}, "user": {"id": "user-a"}},
+    {"scope": {"domain": {"id": "domain-a"}}, "role": {"id": "role-admin"}, "user": {"id": "user-a"}},
+    {"scope": {"system": {"all": "true"}}, "role": {"id": "role-admin"}, "user": {"id": "user-a"}},
+    {"scope": {"system": {"all": True}}, "role": {"id": "role-manager"}, "user": {"id": "user-a"}},
+    {"scope": {"system": {"all": True}}, "role": {"id": "role-admin"}, "user": {"id": "user-b"}},
+    {"scope": {"system": {"all": True}}, "role": {"id": "role-admin"}, "group": {"id": "group-a"}},
+])
+async def test_owner_platform_exception_requires_exact_direct_system_row(monkeypatch, platform, document):
+    client = _owner_directory(roles=("member", platform), system_assignments=[document])
+    monkeypatch.setattr(auth, "_get_admin_ks_client", lambda: client)
+    with pytest.raises(HTTPException) as error:
+        await auth.validate_client_owner("project-a", "user-a")
+    assert error.value.status_code == 422
+    client.role_assignments.list.assert_any_call(user="user-a", project="project-a", effective=True)
+    client.role_assignments.list.assert_any_call(user="user-a", role="role-admin", system="all")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup,system_only,status", [
+    ("catalog", False, 503), ("inferences", False, 503), ("assignments", False, 503),
+    ("catalog", True, 422), ("assignments", True, 422),
+])
+async def test_owner_authority_provider_errors_fail_closed(monkeypatch, lookup, system_only, status):
+    client = _owner_directory(roles=("member", "admin"), system_assignments=[{
+        "scope": {"system": {"all": True}}, "role": {"id": "role-admin"}, "user": {"id": "user-a"},
+    }])
+    target = {"catalog": client.roles.list, "inferences": client.inference_rules.list_inference_roles,
+              "assignments": client.role_assignments.list}[lookup]
+    original = target.side_effect
+
+    def unavailable(**kwargs):
+        if system_only and not ("system" in kwargs or kwargs.get("name") == "admin"):
+            return original(**kwargs)
+        raise RuntimeError("synthetic authority unavailable")
+
+    target.side_effect = unavailable
+    monkeypatch.setattr(auth, "_get_admin_ks_client", lambda: client)
+    with pytest.raises(HTTPException) as error:
+        await auth.validate_client_owner("project-a", "user-a")
+    assert error.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_verified_system_admin_owner_cannot_bypass_service_role_ceiling(monkeypatch):
+    client = _owner_directory(roles=("member", "admin", "waygate_user"), system_assignments=[{
+        "scope": {"system": {"all": True}}, "role": {"id": "role-admin"}, "user": {"id": "user-a"},
+    }])
+    monkeypatch.setattr(auth, "_get_admin_ks_client", lambda: client)
+    await auth.validate_client_owner("project-a", "user-a")
+    client.role_assignments.list.reset_mock()
+    client.inference_rules.list_inference_roles.return_value = [{
+        "prior_role": {"id": "role-waygate_user"}, "implies": [{"id": "role-waygate-clients_admin"}],
+    }]
+    with pytest.raises(HTTPException) as error:
+        await auth.validate_client_owner("project-a", "user-a")
+    assert error.value.status_code == 403
+    client.role_assignments.list.assert_called_once_with(user="user-a", project="project-a", effective=True)
 
 
 @pytest.mark.asyncio
@@ -282,6 +369,7 @@ async def native_http(tmp_path, monkeypatch, synthetic_keystone):
     enabled = {"user-a": True, "user-b": True, "disabled-user": False}
     memberships = {"user-a": "project-a", "user-b": "project-a", "disabled-user": "project-a"}
     current_roles = {}
+    system_admins = set()
     role_names = set(CAPABILITIES) | set(PARENTS) | {"member", "reader", "admin", "manager"}
     graph = {parent: list(leaves) for parent, leaves in PARENTS.items()}
 
@@ -301,7 +389,10 @@ async def native_http(tmp_path, monkeypatch, synthetic_keystone):
 
     def assignments(**kwargs):
         if "system" in kwargs:
-            return []
+            return [_assignment({
+                "user": {"id": kwargs["user"]}, "scope": {"system": {"all": True}},
+                "role": {"id": "admin-id"},
+            })] if kwargs["user"] in system_admins else []
         project_id = kwargs["project"]
         if memberships.get(kwargs["user"]) != project_id:
             return []
@@ -363,6 +454,7 @@ async def native_http(tmp_path, monkeypatch, synthetic_keystone):
                 enabled=enabled, memberships=memberships, path=database_path, settings=settings,
                 private_key=private_key, psk=psk, agent_token=agent_token,
                 current_roles=current_roles, graph=graph, role_names=role_names,
+                system_admins=system_admins,
             )
 
 
@@ -456,12 +548,63 @@ async def test_service_administration_never_downloads_foreign_or_unassigned_priv
 
 
 @pytest.mark.asyncio
-async def test_verified_system_admin_never_downloads_another_members_profile(native_http):
-    native_http.directory.role_assignments.list.side_effect = lambda **kwargs: [_assignment({
-        "scope": {"system": {"all": True}}, "role": {"id": "admin-id"}, "user": {"id": "system-user"},
-    })] if "system" in kwargs else []
-    headers = native_http.headers(["admin"], user_id="system-user")
-    assert (await native_http.client.get(CLIENT + "/config", headers=headers)).status_code == 403
+@pytest.mark.parametrize("platform", ["admin", "manager"])
+async def test_verified_system_admin_owner_assignment_persists_without_broadening_private_access(native_http, monkeypatch, platform):
+    native_http.system_admins.add("user-a")
+    headers = native_http.headers(["member", platform])
+    legacy = SERVER + "/clients/legacy"
+    assert (await native_http.client.get(legacy + "/config", headers=headers)).status_code == 403
+    unassigned = await native_http.client.post(
+        SERVER + "/clients", json={"name": "still-unassigned", "owner_user_id": None}, headers=headers,
+    )
+    assert unassigned.status_code == 201
+    assert (unassigned.json()["owner_user_id"], unassigned.json()["tunnel_conf"]) == (None, None)
+    unassigned_path = SERVER + "/clients/" + unassigned.json()["id"]
+
+    assigned = await native_http.client.patch(legacy, json={"owner_user_id": "user-a"}, headers=headers)
+    assert assigned.status_code == 200 and assigned.json()["owner_user_id"] == "user-a"
+    assert "tunnel_conf" not in assigned.json()
+    native_http.directory.role_assignments.list.assert_any_call(user="user-a", project="project-a", effective=True)
+    native_http.directory.role_assignments.list.assert_any_call(user="user-a", role="admin-id", system="all")
+    reopened = create_async_engine(native_http.settings.database_url)
+    try:
+        async with reopened.connect() as connection:
+            assert (await connection.execute(
+                select(WaygateClient.owner_user_id).where(WaygateClient.id == "legacy")
+            )).scalar_one() == "user-a"
+    finally:
+        await reopened.dispose()
+    downloaded = await native_http.client.get(legacy + "/config", headers=headers)
+    assert downloaded.status_code == 200
+    assert "PrivateKey = " + native_http.private_key in downloaded.text
+    assert "PresharedKey = " + native_http.psk in downloaded.text
+    assert downloaded.headers["cache-control"] == "no-store"
+    assert "attachment;" in downloaded.headers["content-disposition"]
+
+    # Direct system authority neither transfers an existing owner nor claims another NULL profile.
+    assert (await native_http.client.patch(legacy, json={"owner_user_id": "user-b"}, headers=headers)).status_code == 409
+    assert (await native_http.client.patch(legacy, json={"owner_user_id": None}, headers=headers)).status_code == 422
+    assert (await native_http.client.patch(
+        SERVER + "/clients/other", json={"owner_user_id": "user-a"}, headers=headers,
+    )).status_code == 409
+    decrypt = MagicMock(side_effect=AssertionError("unauthorized profile must not decrypt"))
+    monkeypatch.setattr(k3s_crypto, "decrypt_wg_client_key", decrypt)
+    for path in (SERVER + "/clients/other", unassigned_path, SERVER + "/clients/disabled"):
+        assert (await native_http.client.get(path + "/config", headers=headers)).status_code == 403
+    assert (await waygate_db.get_client("server-a", "project-a", unassigned.json()["id"]))["owner_user_id"] is None
+    assert (await waygate_db.get_client("server-a", "project-a", "other"))["owner_user_id"] == "user-b"
+    revoked = await native_http.client.patch(legacy, json={"enabled": False}, headers=headers)
+    assert revoked.status_code == 200 and revoked.json()["enabled"] is False
+    assert (await native_http.client.get(legacy + "/config", headers=headers)).status_code == 403
+    foreign = native_http.headers(["member", platform], project_id="project-b")
+    for method, path, body in [
+        ("GET", legacy + "/config", None), ("PATCH", legacy, {"owner_user_id": "user-a"}),
+        ("DELETE", SERVER, None),
+    ]:
+        assert (await native_http.client.request(method, path, json=body, headers=foreign)).status_code == 404
+    assert (await waygate_db.get_client("server-a", "project-a", "legacy"))["owner_user_id"] == "user-a"
+    assert (await waygate_db.get_server("project-a", "server-a"))["status"] == "ACTIVE"
+    decrypt.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -774,9 +917,7 @@ async def test_routing_leaf_attaches_detaches_but_has_no_inventory_or_bundle_aut
 
 @pytest.mark.asyncio
 async def test_verified_system_admin_http_global_access_still_respects_project_ownership(native_http, monkeypatch):
-    native_http.directory.role_assignments.list.side_effect = lambda **kwargs: [_assignment({
-        "scope": {"system": {"all": True}}, "role": {"id": "admin-id"}, "user": {"id": "system-user"},
-    })] if "system" in kwargs else []
+    native_http.system_admins.add("system-user")
     headers = native_http.headers(["admin"], user_id="system-user", project_id="project-b")
     assert (await native_http.client.get(SERVER, headers=headers)).status_code == 404
     assert (await native_http.client.get(CLIENT + "/config", headers=headers)).status_code == 404
@@ -940,11 +1081,22 @@ async def test_current_graph_transitive_parent_edges_are_resolved(native_http):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prior", ["waygate_reader", "waygate_user", "waygate-inventory_reader", "waygate-connect_user"])
-async def test_lower_service_grade_cannot_reach_privileged_leaf(native_http, prior):
+@pytest.mark.parametrize("system_admin", [False, True])
+async def test_lower_service_grade_cannot_reach_privileged_leaf(native_http, prior, system_admin):
+    if system_admin:
+        native_http.system_admins.add("user-a")
+    headers = native_http.headers(["member", prior] + (["admin"] if system_admin else []))
+    legacy = SERVER + "/clients/legacy"
+    if system_admin:
+        assert (await native_http.client.patch(legacy, json={"owner_user_id": "user-a"}, headers=headers)).status_code == 200
+        assert (await native_http.client.get(legacy + "/config", headers=headers)).status_code == 200
+    # Resolve service-role ceilings before considering even a verified system-admin exception.
     native_http.graph[prior] = ["waygate-clients_admin"]
-    headers = native_http.headers(["member", prior])
     assert (await native_http.client.get(SERVER, headers=headers)).status_code == 403
     assert (await native_http.client.delete(CLIENT, headers=headers)).status_code == 403
+    assert (await native_http.client.get(legacy + "/config", headers=headers)).status_code == 403
+    assert (await native_http.client.patch(legacy, json={"name": "unsafe"}, headers=headers)).status_code == 403
+    assert (await waygate_db.get_client("server-a", "project-a", "legacy"))["owner_user_id"] == ("user-a" if system_admin else None)
 
 
 @pytest.mark.asyncio

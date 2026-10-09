@@ -1,3 +1,27 @@
+# Waygate 0.3.3 system-admin and client-owner repair (candidate)
+
+This source repair removes `effective=True` only from system-all admin assignment lookup. It retains unique global admin-role resolution, exact user/role/scope row filtering and fail-closed errors. Project assignments remain effective and resolve through the existing safety-checked DAG. An owner must be the exact enabled current project member and either have no platform admin/manager roles or be independently verified direct system admin. Group-only or implied system grants are not expanded by this direct-user check; there is no effective-endpoint fallback.
+
+Caller editor/admin gates, locked assign-once ownership, foreign/unassigned/disabled profile denial, and member-only Trust/token role ceilings are unchanged. No legacy or imported profile is automatically assigned, and no credentials or schema change. The installed Keystone SDK/loopback HTTP harness and native owner regressions exercise the incompatible effective-system response, explicit owner PATCH/download and rejection boundaries. Local Python 3.13.12: focused selectors 266 passed / 2 opt-in MariaDB skips; four-worker service suite 686 passed / 3 skips; SDK 44 passed; root/SDK Ruff passed. These are local results, not production acceptance.
+
+**Publication versus hotpatch:** [Published `v0.3.2`](https://github.com/openstack-afterglow/waygate/releases/tag/v0.3.2) is immutable at `7da6a2701d439bee6766b575719638525562cd9c` and predates this repair. Root distribution/runtime/lock and Kolla registry default now prepare patch `0.3.3`; SDK remains `0.2.0`. New tag, exact-revision images and wheel must be published before rollout. The separate prior hotpatch owner PATCH returned HTTP 200 for profile `40fbb38b-5284-4ce9-9279-af1dfcafe2ed`, server `81880192-d366-4b01-8036-53ed4f1ef657`, pieroot user `b9aef3e76c4b4405a91bc0365201fea3`, DMSLAB project `ed38d6d012f84367acf98575048e6cb6`; it is not repeated or promoted to immutable runtime/data-plane proof.
+
+## Parent repair gates
+
+From this checkout root, after integrating and reviewing all intended edits:
+
+```sh
+python3 scripts/check_architecture.py --stamp --summary "Reviewed direct system-admin lookup, enabled member/system-admin owner validation, native SDK decoder and owner regressions; project DAG, assign-once storage and member-only Trust ceilings retained; no topology/schema/dependency change"
+python3 scripts/check_architecture.py
+uv sync --extra service --extra dev --frozen
+uv run pytest tests/test_native_service_grades.py tests/test_execution_delegation.py tests/test_waygate_clients.py -q
+uv run pytest tests
+uv run pytest tests -n 4 --dist worksteal
+uv run ruff check .
+```
+
+The root four-worker and SDK gates above have passed locally; the SDK keeps its existing openstacksdk service_type deprecation warning. The serial suite, staged architecture guard, canonical image build and exact-SHA publication are separate checks. Use only a new immutable `v0.3.3` tag after its CI succeeds; do not recreate `v0.3.2`. Runtime replacement must verify image revision and repair source parity on every controller before production acceptance.
+
 # Waygate 0.3.2 release notes
 
 Service 0.3.2 / independent SDK 0.2.0 is the next patch after published `v0.3.1` (`37a57fa0691a7aa28513c39d93752077699d7679`) and adds native service grades with client ownership (migration 005) and isolated tenant execution credentials (migration 006). The owner authorized the release commit, tag and publication on 2026-10-08; production rollout remains a separate, gated step (see the upgrade prerequisites below), and nothing here claims a deployment.
@@ -23,7 +47,7 @@ Version map: root service distribution/runtime, root `uv.lock` and packaged Koll
 
 ## 0.3.2 maintainer gates
 
-Run on the frozen release commit: `python3 scripts/check_architecture.py --stamp --summary "..."` then `python3 scripts/check_architecture.py` (and `--staged` after staging only intended files); `uv sync --extra service --extra dev --frozen`; `uv run pytest tests`; `uv run pytest tests -n 4 --dist worksteal`; `uv run ruff check .`; in `sdk/`, `uv sync --all-extras --frozen`, `uv run pytest`, `uv run ruff check .`. Opt-in native evidence: `WAYGATE_NATIVE_CONTAINER_SMOKE=1 uv run pytest tests/test_native_service_grades.py -k native_built_images_and_mariadb_upgrade -q -s --tb=short` and `WAYGATE_DELEGATION_MARIADB_URL=... uv run pytest tests/test_execution_delegation.py -q` against a disposable MariaDB. After owner authorization, an annotated `v0.3.2` on the exact verified commit triggers Docker Build & Push (semver `0.3.2`, auto `latest`); from the same tagged source run `uv build --wheel --out-dir dist/0.3.2` and `gh release create v0.3.2 dist/0.3.2/waygate-0.3.2-py3-none-any.whl --verify-tag --title 'Waygate 0.3.2' --notes-file RELEASE_NOTES.md`. These commands were not executed by this preparation.
+The historical 0.3.2 qualification used: `python3 scripts/check_architecture.py --stamp --summary "..."`, `python3 scripts/check_architecture.py` (and `--staged` after staging only intended files); `uv sync --extra service --extra dev --frozen`; `uv run pytest tests`; `uv run pytest tests -n 4 --dist worksteal`; `uv run ruff check .`; in `sdk/`, `uv sync --all-extras --frozen`, `uv run pytest`, `uv run ruff check .`. Optional fresh repair evidence requires separately built canonical images and `WAYGATE_NATIVE_CONTAINER_SMOKE=1 uv run pytest tests/test_native_service_grades.py -k native_built_images_and_mariadb_upgrade -q -s --tb=short`, or `WAYGATE_DELEGATION_MARIADB_URL=<disposable-DSN> uv run pytest tests/test_execution_delegation.py -q`. The 0.3.2 tag-triggered image publication and manual wheel/GitHub Release are completed historical evidence (see CHANGELOG); the post-publication repair has not repeated those gates or published artifacts. Preserve the existing release and obtain separate owner authorization for a new repair release and any production rollout.
 
 # Waygate 0.3.1 release notes (published 2026-10-05)
 

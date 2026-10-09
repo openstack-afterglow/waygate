@@ -53,7 +53,7 @@ def _resolve_admin_role_id(client) -> str | None:
 
 
 def _is_system_admin(user_id: str, client=None) -> bool:
-    """Fail closed unless the user has admin on Keystone system scope."""
+    """Fail closed unless the user has a direct admin assignment on Keystone system scope."""
     if not user_id:
         return False
     try:
@@ -65,7 +65,6 @@ def _is_system_admin(user_id: str, client=None) -> bool:
             user=user_id,
             role=role_id,
             system="all",
-            effective=True,
         )
         return any(
             assignment.to_dict().get("scope", {}).get("system", {}).get("all") is True
@@ -279,7 +278,7 @@ def _validate_client_owner(project_id: str, owner_user_id: str) -> bool:
         return False
     # Assignable owners must be able to use the profile: effective native member through the current DAG.
     roles = set(_current_project_roles(owner_user_id, project_id, client))
-    return "member" in roles and not roles & _PLATFORM_ROLE_NAMES
+    return "member" in roles and (not roles & _PLATFORM_ROLE_NAMES or _is_system_admin(owner_user_id, client))
 
 
 async def validate_client_owner(project_id: str, owner_user_id: str | None) -> None:
