@@ -21,6 +21,9 @@ pool_timeout = 10
 
 [cache]
 redis_url = "{{ waygate_redis_url }}"
+sentinel_enabled = {{ waygate_sentinel_enabled | bool | lower }}
+sentinel_master_name = "{{ waygate_sentinel_master_name }}"
+sentinel_hosts = "{{ waygate_sentinel_hosts }}"
 
 [waygate]
 callback_base_url = "{{ waygate_callback_base_url }}"

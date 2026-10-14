@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.5 — 2026-10-14 (scoped status-fix artifact)
+
+- Acknowledge status204 only after successful TTL300 storage; safe503 on read-only/connection/timeout/backend failure. Fixed-category logs omit raw exception/traceback, DSN, credentials, bearer and payload; DB token authority remains unchanged.
+- Add native async Sentinel primary resolution and Kolla complete Valkey inventory/monitor configuration, preserving existing URL credentials/DB6; no direct-host fallback, cache retry, schema/dependency/IAM/LB/gateway change. Close both primary and Sentinel pools under redis5.
+- Add HTTP failure/auth regressions, hermetic RESP primary/outage/rediscovery checks, actual TOML/environment precedence isolation, complete rendered Kolla inventory and empty-enabled failure tests. Canonical dual-architecture image HTTP verification uses disposable MariaDB/Valkey, not production outages.
+- Release artifact `0.3.5-statusfix.20261014` is deliberately unique/prerelease to avoid overwriting existing stable artifacts or metadata-action's `latest`. Runtime/wheel0.3.5 and SDK0.2.0 are explicit independent version identities. Prior0.3.4 rollout/defect receipts below are historical; deployment evidence is separate.
+
 ## 0.3.4 — 2026-10-14 (CI/tag images published; production rolled out)
 
 - **Residual production defect (pre-existing since 0.3.3):** every Waygate replica's plain `REDIS_URL` targets dms-controller1 Valkey, a **read-only replica**; Sentinel's master is on dms-controller3. `agent_auth.store_status_result` logs handled WARNING `ReadOnlyError`; status POST still returns **204**, but **agent status is not cached**. Code/config are unchanged since 0.3.3. Sentinel-aware or master-routed Redis wiring requires a separate change; healthy replicas and `/v1/health` do not establish cache readiness.

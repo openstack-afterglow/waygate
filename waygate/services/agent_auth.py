@@ -1,4 +1,4 @@
-"""DB-authoritative agent credentials and best-effort Redis status reports.
+"""DB-authoritative agent credentials and acknowledged Valkey status reports.
 
 Current/pending bearer tokens are encrypted in waygate_servers. Authentication
 always reads durable state: stale Redis data must never revive a retired token.
@@ -12,12 +12,30 @@ import logging
 import secrets
 from datetime import UTC, datetime
 
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ReadOnlyError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from waygate.models.schemas import WaygateAgentStatusReport
 
 _logger = logging.getLogger(__name__)
 
 _STATUS_PREFIX = "afterglow:waygate:status:"
 _STATUS_TTL = 300  # Five-minute observational cache; fresh traffic requires a newer report timestamp.
+
+
+class StatusStoreUnavailable(RuntimeError):
+    """The observational status write was not acknowledged by the backend."""
+
+
+def _storage_error_category(error: Exception) -> str:
+    if isinstance(error, ReadOnlyError):
+        return "read_only"
+    if isinstance(error, (RedisTimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(error, (RedisConnectionError, ConnectionError)):
+        return "connection"
+    return "backend"
 
 
 async def _redis():
@@ -61,7 +79,7 @@ async def verify_report_token(server_id: str, token: str) -> dict | None:
                 return {"server_id": server_id, "project_id": project_id}
         return None
     except Exception:
-        _logger.warning("waygate_agent_auth: 토큰 검증 실패 (server=%s)", server_id, exc_info=True)
+        _logger.warning("waygate_agent_auth: token verification unavailable")
         return None
 
 
@@ -115,14 +133,16 @@ async def revoke_report_token_by_server(server_id: str) -> None:
 
 
 async def store_status_result(server_id: str, report: WaygateAgentStatusReport) -> None:
-    """에이전트가 보고한 wg show 상태를 Redis에 저장 (TTL 5분)."""
+    """Store a five-minute observation, or fail without exposing backend details."""
     try:
         r = await _redis()
         payload = report.model_dump()
         payload["_stored_at"] = datetime.now(UTC).isoformat()
-        await r.setex(f"{_STATUS_PREFIX}{server_id}", _STATUS_TTL, json.dumps(payload))
-    except Exception:
-        _logger.warning("waygate_agent_auth: Redis 상태 저장 실패 (server=%s)", server_id, exc_info=True)
+        if not await r.setex(f"{_STATUS_PREFIX}{server_id}", _STATUS_TTL, json.dumps(payload)):
+            raise StatusStoreUnavailable("Status write not acknowledged")
+    except Exception as error:
+        _logger.warning("waygate status storage unavailable category=%s", _storage_error_category(error))
+        raise StatusStoreUnavailable("Agent status storage unavailable") from None
 
 
 async def get_status_result(server_id: str) -> dict | None:
@@ -133,6 +153,6 @@ async def get_status_result(server_id: str) -> dict | None:
         if not raw:
             return None
         return json.loads(raw)
-    except Exception:
-        _logger.warning("waygate_agent_auth: Redis 상태 조회 실패 (server=%s)", server_id, exc_info=True)
+    except Exception as error:
+        _logger.warning("waygate status read unavailable category=%s", _storage_error_category(error))
         return None

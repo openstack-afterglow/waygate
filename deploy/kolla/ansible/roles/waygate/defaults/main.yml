@@ -1,7 +1,7 @@
 ---
 # Waygate kolla role defaults
 
-waygate_image_tag: "0.3.4"
+waygate_image_tag: "0.3.5-statusfix.20261014"
 waygate_image_namespace: "ghcr.io/openstack-afterglow"
 waygate_api_image: "{{ waygate_image_namespace }}/waygate-api"
 waygate_worker_image: "{{ waygate_image_namespace }}/waygate-worker"
@@ -33,6 +33,9 @@ waygate_valkey_port: "{{ valkey_server_port }}"
 waygate_valkey_password: "{{ valkey_master_password }}"
 waygate_redis_db_index: 6
 waygate_redis_url: "redis://default:{{ waygate_valkey_password }}@{{ waygate_valkey_host }}:{{ waygate_valkey_port }}/{{ waygate_redis_db_index }}"
+waygate_sentinel_enabled: true
+waygate_sentinel_master_name: "{{ valkey_sentinel_monitor_name }}"
+waygate_sentinel_hosts: "{% for host in groups['valkey'] %}{{ 'api' | kolla_address(host) }}:{{ valkey_sentinel_port }}{{ ',' if not loop.last else '' }}{% endfor %}"
 
 waygate_keystone_user: "waygate"
 waygate_keystone_auth_url: "{{ keystone_internal_url }}"

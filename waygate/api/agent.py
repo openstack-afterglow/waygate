@@ -131,6 +131,9 @@ async def report_waygate_status(
     server_id: str,
     body: WaygateAgentStatusReport,
 ):
-    """에이전트가 주기적으로 POST하는 wg show 상태 — Redis 캐시(TTL 5분)."""
+    """Acknowledge only a successful five-minute Valkey observation write."""
     await _verify_and_bind(request, server_id)
-    await waygate_agent_auth.store_status_result(server_id, body)
+    try:
+        await waygate_agent_auth.store_status_result(server_id, body)
+    except waygate_agent_auth.StatusStoreUnavailable:
+        raise HTTPException(status_code=503, detail="Agent status storage unavailable") from None

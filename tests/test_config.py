@@ -93,3 +93,26 @@ async def test_api_startup_rejects_missing_callback_before_database_initializati
             pass
 
     init_db.assert_not_called()
+
+
+def test_sentinel_toml_settings_and_environment_precedence(tmp_path):
+    path = tmp_path / "waygate.conf"
+    path.write_text(
+        '[cache]\nsentinel_enabled = true\nsentinel_master_name = "kolla"\n'
+        'sentinel_hosts = "controller1:26379,controller2:26379,controller3:26379"\n'
+    )
+    with patch.dict(os.environ, {"WAYGATE_CONFIG_FILE": str(path)}, clear=True):
+        loaded = config.get_settings()
+        assert loaded.sentinel_enabled is True
+        assert loaded.sentinel_master_name == "kolla"
+        assert loaded.sentinel_hosts == "controller1:26379,controller2:26379,controller3:26379"
+        with patch.dict(os.environ, {
+            "SENTINEL_ENABLED": "false",
+            "SENTINEL_MASTER_NAME": "alternate",
+            "SENTINEL_HOSTS": "alternate1:26380,alternate2:26380",
+        }):
+            config.get_settings.cache_clear()
+            overridden = config.get_settings()
+            assert overridden.sentinel_enabled is False
+            assert overridden.sentinel_master_name == "alternate"
+            assert overridden.sentinel_hosts == "alternate1:26380,alternate2:26380"

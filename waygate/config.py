@@ -61,6 +61,9 @@ def _load_toml() -> dict:
         "database_connect_timeout": database.get("connect_timeout", 10),
         "database_pool_timeout": database.get("pool_timeout", 10),
         "redis_url": cache.get("redis_url", "redis://localhost:6379/6"),
+        "sentinel_enabled": cache.get("sentinel_enabled", False),
+        "sentinel_master_name": cache.get("sentinel_master_name", "mymaster"),
+        "sentinel_hosts": cache.get("sentinel_hosts", ""),
         "waygate_callback_base_url": waygate.get("callback_base_url", ""),
         "waygate_agent_install_mode": waygate.get("agent_install_mode", "cloud-init"),
         "waygate_key_name": waygate.get("key_name", ""),
@@ -92,6 +95,9 @@ class Settings(BaseSettings):
     database_pool_timeout: int = 10
 
     redis_url: str = "redis://localhost:6379/6"
+    sentinel_enabled: bool = False
+    sentinel_master_name: str = "mymaster"
+    sentinel_hosts: str = ""
 
     waygate_callback_base_url: str = ""
     waygate_agent_install_mode: str = "cloud-init"

@@ -13,6 +13,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ReadOnlyError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -363,6 +366,35 @@ class TestAgentStatusHappyPath:
         assert stored is not None
         assert stored["peers"][0]["rx_bytes"] == 100
         assert stored["agent_source"] == "prebuilt"
+
+    @pytest.mark.parametrize("error_type", [ReadOnlyError, RedisConnectionError, RedisTimeoutError, RuntimeError])
+    async def test_status_storage_failure_returns_safe_503(self, api_client, caplog, error_type):
+        token = await waygate_agent_auth.issue_report_token("server-1")
+        cache = await waygate_agent_auth._redis()
+        sensitive = "redis://private:password@backend/6 bearer payload must-not-leak"
+        with patch.object(cache, "setex", AsyncMock(side_effect=error_type(sensitive))):
+            response = await api_client.post(
+                "/v1/servers/server-1/agent/status",
+                json={"peers": []},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 503
+        assert response.json() == {"detail": "Agent status storage unavailable"}
+        assert await waygate_agent_auth.get_status_result("server-1") is None
+        assert sensitive not in caplog.text
+        assert token not in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+
+    async def test_status_storage_outage_does_not_bypass_agent_auth(self, api_client):
+        await waygate_agent_auth.issue_report_token("server-1")
+        cache = await waygate_agent_auth._redis()
+        with patch.object(cache, "setex", AsyncMock(side_effect=ReadOnlyError("unavailable"))):
+            response = await api_client.post(
+                "/v1/servers/server-1/agent/status",
+                json={"peers": []},
+                headers={"Authorization": "Bearer invalid"},
+            )
+        assert response.status_code == 401
 
     @pytest.mark.asyncio
     async def test_status_report_rejects_invalid_sampling_cadence(self, api_client):

@@ -138,3 +138,34 @@ def test_root_wheel_build_and_install_includes_kolla_role(tmp_path: Path):
     assert res_uninst.returncode == 0, f"uv pip uninstall failed: {res_uninst.stderr}"
     remaining_files = list(installed_role.glob("**/*")) if installed_role.exists() else []
     assert not [path for path in remaining_files if path.is_file()], "Uninstall left behind role files"
+
+
+def test_sentinel_template_renders_all_valkey_hosts_and_monitor_name():
+    from jinja2 import meta
+
+    defaults = yaml.safe_load((ROLE_DIR / "defaults/main.yml").read_text())
+    addresses = {"controller1": "192.0.2.11", "controller2": "192.0.2.12", "controller3": "192.0.2.13"}
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    env.filters["kolla_address"] = lambda network, host: addresses[host]
+    env.filters["bool"] = bool
+    inventory = {
+        "groups": {"valkey": list(addresses)},
+        "valkey_sentinel_port": 26379,
+        "valkey_sentinel_monitor_name": "kolla-current",
+    }
+    source = (ROLE_DIR / "templates/waygate.conf.j2").read_text()
+    variables = {key: "" for key in meta.find_undeclared_variables(env.parse(source))}
+    variables.update({
+        "waygate_sentinel_enabled": defaults["waygate_sentinel_enabled"],
+        "waygate_sentinel_master_name": env.from_string(defaults["waygate_sentinel_master_name"]).render(inventory),
+        "waygate_sentinel_hosts": env.from_string(defaults["waygate_sentinel_hosts"]).render(inventory),
+        "waygate_redis_url": "redis://localhost:6379/6",
+        "waygate_default_listen_port": 51820,
+        "openstack_insecure": False,
+    })
+    rendered = tomllib.loads(env.from_string(source).render(variables))["cache"]
+    assert rendered["sentinel_enabled"] is True
+    assert rendered["sentinel_master_name"] == "kolla-current"
+    assert rendered["sentinel_hosts"].split(",") == [
+        "192.0.2.11:26379", "192.0.2.12:26379", "192.0.2.13:26379",
+    ]

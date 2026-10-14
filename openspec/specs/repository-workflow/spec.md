@@ -58,6 +58,21 @@ Agent 인증은 server-bound bearer와 DB 정본을 timing-safe 검증하고 DB 
 - **WHEN** 폐기된 bearer가 Redis에 남거나 DB가 응답하지 않는다
 - **THEN** cache로 인증을 허용하지 않고 durable DB 권한을 기준으로 실패 처리한다.
 
+### Requirement: Status acknowledgements reflect completed cache storage
+
+Agent status SHALL return204 only after acknowledged TTL300 storage. Read-only, connection, timeout or other failed/unacknowledged writes SHALL return a safe non-success503 without DSN/credential/bearer/payload/raw exception/traceback. Authentication remains server-bound and DB-authoritative. Redis-protocol cache observations are not durable authority.
+
+Kolla SHALL pass the complete Valkey Sentinel inventory and monitor name when Sentinel mode is enabled. The client SHALL resolve primary using native Sentinel pooling while preserving existing URL credentials/database; missing/empty/down Sentinel primary SHALL NOT trigger direct-URL fallback. Stock Kolla Sentinel control-plane connections and primary data-plane AUTH remain separate. No production failover, replica write-protection relaxation, unrelated-service reconfigure or schema migration is needed for this status patch.
+
+#### Scenario: The configured first Valkey host is a read-only replica
+- **WHEN** an authenticated agent posts status while the inventory-first host is not primary
+- **THEN** Sentinel discovery resolves current primary; successful persistence returns204 with TTL300, and any failed persistence returns503 with bounded safe logs.
+
+#### Scenario: API-only cache repair rollout
+- **WHEN** no worker job semantics/schema change is required
+- **THEN** immutable API publication and same-source role configuration may be applied through `--tags waygate --skip-tags haproxy` with worker excluded from start/pull; prior image/config and running workers are preserved, and production write/read is verified independently of process health.
+
+
 #### Scenario: Dependent data races with deletion
 - **WHEN** client/attachment 생성·수정 또는 서버 기본값 변경이 삭제와 경합한다
 - **THEN** 동일 parent-row admission lock과 ACTIVE 검사를 유지하고 cloud cleanup 및 client 비활성화·키 삭제·attachment 정리 후에만 durable DELETED tombstone으로 job 완료를 판정한다.

@@ -1800,7 +1800,7 @@ wheels = [
 
 [[package]]
 name = "waygate"
-version = "0.3.4"
+version = "0.3.5"
 source = { editable = "." }
 
 [package.optional-dependencies]
