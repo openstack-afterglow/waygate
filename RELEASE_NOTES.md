@@ -1,8 +1,14 @@
-# Waygate 0.3.4 candidate — merged ownership and authorization source
+# Waygate 0.3.4 — merged ownership and authorization release
 
-**Unreleased; locally qualified merged candidate.** This is the next patch after [published `v0.3.3`](https://github.com/openstack-afterglow/waygate/releases/tag/v0.3.3) (`fd2d1b3693b61c1d32cbdc1029662d342835b6a8`, 2026-10-09). It combines that direct-user system-admin/client-owner repair, the published 0.3.2 native grades and isolated execution credentials, and renewable SQL job ownership. Fresh integrated-tree qualification is recorded below. Earlier repair/publication and WIP receipts remain evidence of only their own snapshots. No 0.3.4 CI run, tag, package/image publication, operator change or production deployment is claimed.
+**CI/tag images published; production rolled out on 2026-10-14.** This patch follows [published `v0.3.3`](https://github.com/openstack-afterglow/waygate/releases/tag/v0.3.3) (`fd2d1b3693b61c1d32cbdc1029662d342835b6a8`, 2026-10-09). It combines that direct-user system-admin/client-owner repair, the published 0.3.2 native grades and isolated execution credentials, and renewable SQL job ownership. Exact-SHA CI and the `0.3.4` tag Docker workflow succeeded for `1c752692f053b78df963805583c930a7a801241b`; publication and production receipts appear below, separately from local qualification and historical snapshot evidence. No GitHub Release/wheel asset or SDK republish receipt is supplied by these observations.
 
-Root distribution (`pyproject.toml`), runtime (`waygate/__init__.py`), root `uv.lock` and packaged Kolla `waygate_image_tag` prepare **0.3.4**. The independent SDK distribution/runtime/lock remain **0.2.0**, with no SDK republish implied. Upstream `dev` [manifest](https://github.com/openstack-afterglow/waygate/blob/dev/pyproject.toml), [initializer](https://github.com/openstack-afterglow/waygate/blob/dev/waygate/__init__.py) and [Kolla default](https://github.com/openstack-afterglow/waygate/blob/dev/deploy/kolla/ansible/roles/waygate/defaults/main.yml) were observed at 0.3.3 during preparation; no newer dev commit was found at the qualification re-fetch. Native `uv lock` resolved 84 packages and reported only `Updated waygate v0.3.3 -> v0.3.4`; no dependency upgrade was requested. Kolla source-build pin remains `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03`, not this candidate; source-mode operators must explicitly select a reviewed immutable release commit. Production uses image mode, so the retained source pin is unchanged and does not select the deployed API/worker runtime.
+## Residual production defect — agent status is not cached
+
+**Every Waygate replica's plain `REDIS_URL` targets the dms-controller1 Valkey, which is a read-only replica; Sentinel's master is on dms-controller3.** `agent_auth.store_status_result` logs a handled WARNING `ReadOnlyError`: status POST still returns **204**, but **agent status is not cached**. This is **pre-existing, with code/config unchanged since 0.3.3**, not a new 0.3.4 regression. Fixing it requires **Sentinel-aware or master-routed Redis wiring in a separate change**. The successful process health checks below do not establish Redis readiness or working status caching.
+
+## Release metadata
+
+Root distribution (`pyproject.toml`), runtime (`waygate/__init__.py`), root `uv.lock` and packaged Kolla `waygate_image_tag` are **0.3.4**. The independent SDK distribution/runtime/lock remain **0.2.0**, with no SDK republish implied. Upstream `dev` [manifest](https://github.com/openstack-afterglow/waygate/blob/dev/pyproject.toml), [initializer](https://github.com/openstack-afterglow/waygate/blob/dev/waygate/__init__.py) and [Kolla default](https://github.com/openstack-afterglow/waygate/blob/dev/deploy/kolla/ansible/roles/waygate/defaults/main.yml) were observed at 0.3.3 during preparation; no newer dev commit was found at the qualification re-fetch. Native `uv lock` resolved 84 packages and reported only `Updated waygate v0.3.3 -> v0.3.4`; no dependency upgrade was requested. Kolla source-build pin remains `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03`, not the release commit; source-mode operators must explicitly select a reviewed immutable release commit. Production uses image mode, so the retained source pin is unchanged and does not select the deployed API/worker runtime.
 
 ## Combined behavior and boundaries
 
@@ -35,7 +41,7 @@ The release integration clone was qualified on latest fetched `origin/dev` with 
 
 The native smoke used MariaDB **11.4.13** and preserved 001–004 ledger/records/ciphertext through packaged 005–006. Legacy NULL owners survived reopen, competing assign-once updates held, and native HTTP with the installed directory SDK/public Waygate SDK exercised ownership, downgrade, export and machine callbacks. Worker polling/shutdown in this image smoke is idle-cloud qualification, not by itself slow-job drain proof. Delegation regressions include actual-worker held-SDK SIGTERM/SIGINT drain, factory/caller cancellation, slow-authority final-send takeover, stale retry status fences and accepted port/VM response loss; providers and identity/cloud endpoints are synthetic. FIP implementation is not FIP response-loss acceptance.
 
-The current architecture review is recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md#maintenance) using the canonical stamp/check. No standalone serial-suite, focused-selector, formatter or explicit release-wheel build receipt is supplied by this qualification. Live Keystone/Nova/Neutron/Cinder policy, gateway image/guest migration, WireGuard data plane, SQL failover/replication-loss/time skew, mixed-version fleet and production rollout remain separate unqualified boundaries.
+The current architecture review is recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md#maintenance) using the canonical stamp/check. No standalone serial-suite, focused-selector, formatter or explicit release-wheel build receipt is supplied by this qualification. Live Keystone/Nova/Neutron/Cinder policy, gateway image/guest migration, WireGuard data plane, SQL failover/replication-loss/time skew and mixed-version fleet remain separate unqualified boundaries. Production cutover is now recorded below; it does not qualify those boundaries or resolve the Redis defect above.
 
 ### Reproduction and supplemental gates
 
@@ -76,7 +82,23 @@ The smoke must execute each image as aarch64/x86_64 with real disposable MariaDB
 
 ## Maintainer gates and manual publication
 
-Publication/rollout gates remain pending and require separate owner authorization; completed local qualification above does not satisfy them. Never move/overwrite existing tags, images or wheels. Future `v0.3.4` must identify the exact reviewed, tested integrated release commit, not the earlier WIP snapshot. The existing Docker workflow gates non-PR publication through service/SDK CI, publishes hosted linux/amd64 targets only and does not create a GitHub Release/wheel. Semver metadata emits `0.3.4`; stable tags can also update auto-generated `latest` (not main-only). Dev/SHA images are not release or production proof. After authorized immutable tag/image publication, verify API/worker digests, revision and platform; build the wheel from that same tagged source. The manual asset command would be `gh release create v0.3.4 dist/0.3.4/waygate-0.3.4-py3-none-any.whl --verify-tag --title 'Waygate 0.3.4' --notes-file RELEASE_NOTES.md`; it has not run and is not PyPI publication. Operator lock/pin promotion, backups, ledger audit (001–006 already applied in the observed production baseline), quiesce/reconcile/drain and explicit old-worker stop, approved Kolla inventory/genconfig/reconfigure order, per-controller revision/source parity, readiness and authenticated live lifecycle/data-plane acceptance are later separate gates. This documentation update does not stage, commit, tag, push, upload or deploy.
+**Observed publication:** exact-SHA CI succeeded for source `1c752692f053b78df963805583c930a7a801241b`, and tag `0.3.4` Docker publication succeeded. The published linux/amd64 images have OCI revision `1c752692`:
+
+| Image | Published and deployed digest |
+|---|---|
+| `waygate-api` | `sha256:58bd04bded3eededb069ce0bf99595afc71a836bc315d845815394eb2c268e95` |
+| `waygate-worker` | `sha256:72dc742b0058bb056ef60990fc70faa8ebc5718dcb8934fed391565b0de3cb08` |
+
+Never move/overwrite existing tags, images or wheels. The Docker workflow gates non-PR publication through service/SDK CI and publishes hosted linux/amd64 targets; local dual-architecture qualification does not establish arm64 publication. It does not create a GitHub Release/wheel. No standalone release-wheel checksum or GitHub Release asset receipt is supplied here; do not infer one from tag/image success or operator package installation. Future artifact publication still requires owner authorization and same-source provenance. Authenticated live lifecycle/data-plane acceptance remains separate from the completed process-health rollout.
+
+## Production rollout receipt — 2026-10-14
+
+- DMS Lab production, within the common **09:43–11:15 UTC** rollout window. Canonical Kolla used **`--skip-tags haproxy` on every action** (pull/prechecks/genconfig/reconfigure/deploy); known dms-controller3 HAProxy/ProxySQL/Keepalived image drift was left untouched.
+- Terminal work gate: `waygate_jobs` **20 completed / 1 failed**. Stop every API, gate again, then stop every worker (whole cohort, no mixed old/new); all **6 writers exited 0**.
+- Cold MariaDB dump restored in an isolated **network-none tmpfs** environment with exact per-table counts: **7 tables / 54 rows**. **No migration**, ledger **6/6 (001–006)** unchanged; **genconfig changed nothing**.
+- Operator `/etc/kolla` package promoted to **waygate 0.3.4**; installed Kolla role **22 files byte-identical to the tag**. Reconfigure completed; all six replicas were on the pinned digests above with OCI revision **`1c752692`**, healthy and **0 restarts**.
+- **`/v1/health` returned 200 ×3 listeners + public.** These are process-only checks; the residual read-only Redis defect above remains. No policy/IAM, LB/route change or paid inference was performed.
+- Every non-target container remained unchanged. The whole-rollout census against the pre-Drover baseline was **234 / 231 / 144** non-target containers on controllers 1 / 2 / 3, with none added; these are common rollout counts, not Waygate-specific counts.
 
 ## Prior renewable-ownership WIP receipt — not merged-candidate acceptance
 
@@ -94,7 +116,7 @@ Caller editor/admin gates, locked assign-once ownership, foreign/unassigned/disa
 
 ## Parent repair gates
 
-The following commands and outcomes describe the earlier repair checkout, not the merged 0.3.4 candidate:
+The following commands and outcomes describe the earlier repair checkout, not the merged 0.3.4 release:
 
 ```sh
 python3 scripts/check_architecture.py --stamp --summary "Reviewed direct system-admin lookup, enabled member/system-admin owner validation, native SDK decoder and owner regressions; project DAG, assign-once storage and member-only Trust ceilings retained; no topology/schema/dependency change"
@@ -106,7 +128,7 @@ uv run pytest tests -n 4 --dist worksteal
 uv run ruff check .
 ```
 
-The earlier root four-worker and SDK gates passed locally; the SDK kept its existing openstacksdk service_type deprecation warning. The separate subsequent v0.3.3 publication receipt above records the successful tag image workflow; it does not supply fresh merged-0.3.4 image/runtime evidence. Use the current 0.3.4 candidate gates for integrated qualification; production acceptance still requires every controller's exact revision and source parity.
+The earlier root four-worker and SDK gates passed locally; the SDK kept its existing openstacksdk service_type deprecation warning. The separate subsequent v0.3.3 publication receipt above records the successful tag image workflow; it does not supply fresh merged-0.3.4 image/runtime evidence. Use the current 0.3.4 local qualification, exact-SHA CI/tag publication and all-replica production receipts above for their respective boundaries; live lifecycle/data-plane qualification remains separate.
 
 # Waygate 0.3.2 release notes
 
