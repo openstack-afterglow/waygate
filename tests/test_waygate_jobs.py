@@ -235,7 +235,7 @@ async def test_third_failure_terminalizes_job_and_server(monkeypatch):
         kind="delete",
         status="running",
         attempts=3,
-        claimed_at=object(),
+        claimed_at=datetime.now(UTC),
         last_error=None,
         updated_at=None,
     )
@@ -459,6 +459,7 @@ def deletion_store(monkeypatch):
     monkeypatch.setattr(waygate_db, "get_session_factory", lambda: lambda: _SqlSession(engine))
     monkeypatch.setattr(waygate_jobs, "get_session_factory", lambda: lambda: _SqlSession(engine))
     monkeypatch.setattr(execution, "get_session_factory", lambda: lambda: _SqlSession(engine))
+    monkeypatch.setattr(waygate_provisioner, "get_session_factory", lambda: lambda: _SqlSession(engine))
     yield engine
     engine.dispose()
 
@@ -908,13 +909,55 @@ async def test_inflight_attachment_cannot_be_terminalized_before_port_assignment
         assert session.scalar(select(WaygateNetworkAttachment)).status == "CREATING"
 
 
+
+def _owned_delete_connection(engine, *, floating_ip=False):
+    """Native proxy seams with exact legacy identities and mutable cloud state."""
+    with Session(engine) as session:
+        server = session.get(WaygateServer, "server-1")
+        server.server_vm_id = "vm-1"
+        server.provider_port_id = "provider-port"
+        server.provider_network_id = "provider-net"
+        if floating_ip:
+            server.fip_id = "fip-1"
+            server.floating_network_id = "external-net"
+        session.commit()
+    ports = {"provider-port": SimpleNamespace(
+        id="provider-port", project_id="project-1", network_id="provider-net", device_id="vm-1",
+    )}
+    servers = {"vm-1": SimpleNamespace(
+        id="vm-1", project_id="project-1", metadata={
+            "afterglow_managed": "true", "waygate_type": "gateway", "waygate_server_id": "server-1",
+        },
+    )}
+    ips = {"fip-1": SimpleNamespace(
+        id="fip-1", project_id="project-1", floating_network_id="external-net", port_id="provider-port",
+    )} if floating_ip else {}
+
+    def delete_server(vm_id, **_kwargs):
+        servers.pop(vm_id, None)
+        ports["provider-port"].device_id = ""
+
+    conn = SimpleNamespace(
+        compute=SimpleNamespace(
+            get_server=MagicMock(side_effect=lambda vm_id: servers.get(vm_id)),
+            delete_server=MagicMock(side_effect=delete_server),
+        ),
+        network=SimpleNamespace(
+            get_port=MagicMock(side_effect=lambda port_id: ports.get(port_id)),
+            get_ip=MagicMock(side_effect=lambda ip_id: ips.get(ip_id)),
+            ports=MagicMock(return_value=[]), ips=MagicMock(return_value=[]),
+            delete_ip=MagicMock(side_effect=lambda ip_id, **_kwargs: ips.pop(ip_id, None)),
+        ),
+    )
+    return conn
+
 async def test_cloud_delete_waits_for_inflight_attachment(deletion_store, monkeypatch):
     with Session(deletion_store) as session:
         att = session.scalar(select(WaygateNetworkAttachment))
         att.status = "CREATING"
         att.port_id = None
         session.commit()
-    conn = SimpleNamespace(close=MagicMock())
+    conn = _owned_delete_connection(deletion_store)
     delete_port = MagicMock()
     monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", delete_port)
 
@@ -929,14 +972,8 @@ async def test_cloud_delete_waits_for_inflight_attachment(deletion_store, monkey
 
 @pytest.mark.parametrize("failure", ["vm_timeout", "attachment_port"])
 async def test_delete_job_retries_cloud_failure_before_terminal_cleanup(deletion_store, monkeypatch, failure):
-    with Session(deletion_store) as session:
-        server = session.get(WaygateServer, "server-1")
-        server.server_vm_id = "vm-1"
-        server.provider_port_id = "provider-port"
-        server.fip_id = "fip-1"
-        session.commit()
+    conn = _owned_delete_connection(deletion_store, floating_ip=True)
 
-    conn = SimpleNamespace(network=SimpleNamespace(delete_ip=MagicMock()), close=MagicMock())
     ports = []
     fail_port_once = failure == "attachment_port"
 
@@ -947,12 +984,16 @@ async def test_delete_job_retries_cloud_failure_before_terminal_cleanup(deletion
             fail_port_once = False
             raise RuntimeError("port busy")
 
-    wait = MagicMock(side_effect=[TimeoutError("VM deletion timed out"), None] if failure == "vm_timeout" else None)
+    if failure == "vm_timeout":
+        conn.compute.get_server.side_effect = [
+            SimpleNamespace(id="vm-1", project_id="project-1", metadata={
+                "afterglow_managed": "true", "waygate_type": "gateway", "waygate_server_id": "server-1",
+            }),
+            TimeoutError("VM deletion timed out"),
+            None,
+        ]
     _delegate(monkeypatch, conn)
-    monkeypatch.setattr(waygate_provisioner.neutron, "cleanup_instance_fips", MagicMock())
     monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", delete_port)
-    monkeypatch.setattr(waygate_provisioner.nova, "delete_server", MagicMock())
-    monkeypatch.setattr(waygate_provisioner.nova, "wait_server_deleted", wait)
     monkeypatch.setattr(waygate_provisioner.waygate_agent_auth, "revoke_report_token_by_server", AsyncMock())
 
     assert await _enqueue_delete(deletion_store)
@@ -988,19 +1029,16 @@ async def test_delete_job_retries_cloud_failure_before_terminal_cleanup(deletion
         assert len(ports) == 2
     else:
         assert ports == ["port-1", "port-1", "provider-port"]
-    assert conn.network.delete_ip.call_count == (1 if failure == "vm_timeout" else 2)
+    assert conn.network.delete_ip.call_count == 1
 
 
 @pytest.mark.parametrize("failure", ["ports", "floating_ips", "delete_ip"])
 async def test_discovered_floating_ip_remains_retryable_until_removed(deletion_store, monkeypatch, failure):
-    with Session(deletion_store) as session:
-        server = session.get(WaygateServer, "server-1")
-        server.server_vm_id = "vm-1"
-        session.commit()
+    conn = _owned_delete_connection(deletion_store)
 
     floating_ips = {
-        "attached": SimpleNamespace(id="attached", port_id="port-1"),
-        "foreign": SimpleNamespace(id="foreign", port_id="other-port"),
+        "attached": SimpleNamespace(id="attached", project_id="project-1", port_id="port-1"),
+        "foreign": SimpleNamespace(id="foreign", project_id="project-1", port_id="other-port"),
     }
     failed = False
 
@@ -1012,9 +1050,9 @@ async def test_discovered_floating_ip_remains_retryable_until_removed(deletion_s
 
     def ports(**_kwargs):
         maybe_fail("ports")
-        return [SimpleNamespace(id="port-1")]
+        return [SimpleNamespace(id="port-1", device_id="vm-1", project_id="project-1")]
 
-    def ips():
+    def ips(**_kwargs):
         maybe_fail("floating_ips")
         return list(floating_ips.values())
 
@@ -1025,20 +1063,13 @@ async def test_discovered_floating_ip_remains_retryable_until_removed(deletion_s
     def update_ip(ip_id, *, port_id):
         floating_ips[ip_id].port_id = port_id
 
-    conn = SimpleNamespace(
-        network=SimpleNamespace(
-            ports=ports,
-            ips=ips,
-            delete_ip=delete_ip,
-            update_ip=update_ip,
-        ),
-        close=MagicMock(),
-    )
-    delete_vm = MagicMock()
+    conn.network.ports = ports
+    conn.network.ips = ips
+    conn.network.delete_ip = delete_ip
+    conn.network.update_ip = update_ip
+    delete_vm = conn.compute.delete_server
     _delegate(monkeypatch, conn)
     monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", MagicMock())
-    monkeypatch.setattr(waygate_provisioner.nova, "delete_server", delete_vm)
-    monkeypatch.setattr(waygate_provisioner.nova, "wait_server_deleted", MagicMock())
     monkeypatch.setattr(waygate_provisioner.waygate_agent_auth, "revoke_report_token_by_server", AsyncMock())
 
     await _enqueue_delete(deletion_store)
@@ -1140,14 +1171,13 @@ async def test_claim_reconciles_tombstone_before_retry_limit(
         assert session.get(WaygateServer, "server-2").status == terminal_status
 
 
-async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(deletion_store, monkeypatch):
+async def test_worker_recovers_poll_error_and_drains_current_job_on_stop(deletion_store, monkeypatch):
     from waygate import worker
 
-    now = datetime.now(UTC)
-    monkeypatch.setattr(waygate_jobs, "_now", lambda: now)
     await _enqueue_delete(deletion_store, "project-2", "server-2")
     process = waygate_jobs.process_one_job
     polls = 0
+    started, finish, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def recover_poll():
         nonlocal polls
@@ -1156,15 +1186,10 @@ async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(dele
             raise RuntimeError("database connection unavailable")
         return await process()
 
-    async def cancelled_delete(*_args, **_kwargs):
-        raise asyncio.CancelledError
-
-    pauses = []
-    sleep = asyncio.sleep
-
-    async def pause(seconds):
-        pauses.append(seconds)
-        await sleep(0)
+    async def draining_delete(project_id, server_id, user_id, **_kwargs):
+        started.set()
+        await finish.wait()
+        await waygate_db.soft_delete_server(project_id, server_id, user_id)
 
     close = AsyncMock()
     monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(
@@ -1175,21 +1200,29 @@ async def test_worker_recovers_poll_error_and_preserves_cancelled_job_lease(dele
     monkeypatch.setattr(worker, "init_db", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker, "close_db", close)
     monkeypatch.setattr(worker, "process_one_job", recover_poll)
-    monkeypatch.setattr(worker.asyncio, "sleep", pause)
-    monkeypatch.setattr(waygate_jobs, "delete_waygate_server", cancelled_delete)
+    monkeypatch.setattr(waygate_jobs, "delete_waygate_server", draining_delete)
     _delegate(monkeypatch, SimpleNamespace())
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(worker.serve(), timeout=1)
-    assert polls == 2 and pauses == [0.5]
+    task = asyncio.create_task(worker.serve(stop))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        stop.set()
+        await asyncio.sleep(0)
+        assert not task.done()
+        close.assert_not_awaited()
+        with Session(deletion_store) as session:
+            job = session.scalar(select(WaygateJob))
+            assert (job.status, job.attempts, job.last_error) == ("running", 1, None)
+            assert session.get(WaygateServer, "server-2").deleted_at is None
+    finally:
+        finish.set()
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+    assert polls == 2
     close.assert_awaited_once()
     with Session(deletion_store) as session:
         job = session.scalar(select(WaygateJob))
-        assert (job.status, job.attempts, job.last_error) == ("running", 1, None)
-        assert session.get(WaygateServer, "server-2").deleted_at is None
-
-    monkeypatch.setattr(waygate_jobs, "_now", lambda: now + timedelta(seconds=901))
-    assert (await waygate_jobs._claim_one())[1:5] == (2, "delete", "project-2", "server-2")
+        assert (job.status, job.attempts, job.claimed_at) == ("completed", 1, None)
+        assert session.get(WaygateServer, "server-2").status == "DELETED"
 
 
 async def test_completion_write_failure_does_not_fail_successful_last_delete(deletion_store, monkeypatch):
@@ -1324,6 +1357,15 @@ async def test_pending_delete_takes_precedence_over_successful_provision_reconci
 async def test_worker_job_success_and_failed_retry_logs_only_safe_stage_metadata(deletion_store, monkeypatch, caplog):
     import logging
 
+    with Session(deletion_store) as session:
+        session.get(WaygateServer, "server-1").status = "PROVISIONING"
+        session.add_all([
+            WaygateJob(id="job-1", project_id="project-1", server_id="server-1", kind="provision",
+                       status="running", attempts=1, claimed_at=datetime.now(UTC)),
+            WaygateJob(id="job-2", project_id="project-2", server_id="server-2", kind="provision",
+                       status="running", attempts=3, claimed_at=datetime.now(UTC)),
+        ])
+        session.commit()
     claims = iter([
         ("job-1", 1, "provision", "project-1", "server-1", None, None, "grant-1"),
         ("job-2", 3, "provision", "project-2", "server-2", None, None, "grant-2"),
@@ -1364,3 +1406,41 @@ async def test_worker_job_success_and_failed_retry_logs_only_safe_stage_metadata
     assert "query=claim result=found" in messages
     assert "private-secret" not in messages
     assert "server-1" not in messages
+
+
+async def test_delete_job_removes_exact_recorded_floating_ip_already_detached(deletion_store, monkeypatch):
+    conn = _owned_delete_connection(deletion_store, floating_ip=True)
+    conn.network.get_ip("fip-1").port_id = None
+    _delegate(monkeypatch, conn)
+    monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", MagicMock())
+    assert await _enqueue_delete(deletion_store)
+    assert await waygate_jobs.process_one_job() is True
+    conn.network.delete_ip.assert_called_once_with("fip-1", ignore_missing=True)
+    with Session(deletion_store) as session:
+        assert session.get(WaygateServer, "server-1").status == "DELETED"
+        assert session.scalar(select(WaygateJob)).status == "completed"
+
+
+@pytest.mark.parametrize("invalid", [
+    {"id": None}, {"device_id": None}, {"device_id": "foreign-vm"},
+    {"project_id": None}, {"project_id": "foreign-project"},
+])
+async def test_delete_job_rejects_unowned_cleanup_port_before_floating_ip_delete(deletion_store, monkeypatch, invalid):
+    conn = _owned_delete_connection(deletion_store)
+    port = {"id": "port-1", "device_id": "vm-1", "project_id": "project-1", **invalid}
+    conn.network.ports.return_value = [SimpleNamespace(**port)]
+    conn.network.ips.return_value = [SimpleNamespace(id="attached-fip", port_id="port-1", project_id="project-1")]
+    delete_port = MagicMock()
+    _delegate(monkeypatch, conn)
+    monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", delete_port)
+    assert await _enqueue_delete(deletion_store)
+    assert await waygate_jobs.process_one_job() is True
+    conn.network.delete_ip.assert_not_called()
+    conn.compute.delete_server.assert_not_called()
+    delete_port.assert_not_called()
+    with Session(deletion_store) as session:
+        server = session.get(WaygateServer, "server-1")
+        job = session.scalar(select(WaygateJob))
+        assert server.deleted_at is None
+        assert (job.status, job.attempts) == ("queued", 1)
+        assert session.get(WaygateClient, "client-1").deleted_at is None

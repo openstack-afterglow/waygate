@@ -14,8 +14,10 @@ from waygate.services.jobs import process_one_job
 _logger = logging.getLogger(__name__)
 
 
-async def serve() -> None:
+async def serve(stop: asyncio.Event | None = None) -> None:
     configure_logging()
+    if stop is None:
+        stop = asyncio.Event()
     settings = get_settings()
     require_public_callback_base_url(settings)
     if not settings.database_url:
@@ -29,14 +31,17 @@ async def serve() -> None:
     )
     _logger.info("worker stage=ready status=started")
     try:
-        while True:
+        while not stop.is_set():
             try:
                 processed = await process_one_job()
             except Exception as exc:
                 _logger.error("worker stage=poll status=failed error_type=%s", type(exc).__name__)
                 processed = False
-            if not processed:
-                await asyncio.sleep(0.5)
+            if not processed and not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=0.5)
+                except TimeoutError:
+                    pass
     finally:
         await close_db()
         _logger.info("worker stage=shutdown status=stopped")
@@ -44,9 +49,10 @@ async def serve() -> None:
 
 async def _main_async() -> None:
     loop = asyncio.get_running_loop()
-    task = asyncio.create_task(serve())
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve(stop))
     for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(shutdown_signal, task.cancel)
+        loop.add_signal_handler(shutdown_signal, stop.set)
     try:
         await task
     except asyncio.CancelledError:

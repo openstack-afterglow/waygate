@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -37,6 +38,35 @@ class ExecutionDenied(PermissionError):
 
 class ExecutionUnavailable(RuntimeError):
     """The current execution authority cannot be verified."""
+
+
+class ClaimLost(RuntimeError):
+    """The SQL attempt no longer owns a fresh job lease."""
+
+
+current_claim: ContextVar = ContextVar("waygate_job_claim", default=None)
+
+
+async def drain_task(task):
+    """Wait for owned work even under repeated cancellation, then propagate it."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException:
+            break
+    if cancelled:
+        # Consume failures too: cancellation must not leave an orphaned task.
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError
+    return task.result()
+
+
+async def drain_thread(fn, *args, **kwargs):
+    return await drain_task(asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs)))
 
 
 @dataclass(frozen=True)
@@ -191,11 +221,35 @@ class _ExecutionSession(ks_session.Session):
         settings = get_settings()
         super().__init__(auth=_TrustPassword(grant), timeout=30, verify=settings.ssl_verify)
         self.grant = grant
+        self.claim = current_claim.get()
+
+    def _check_claim(self):
+        if self.claim is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is self.claim.loop:
+            raise RuntimeError("Job SDK discovery and I/O must run in its drained provider thread")
+        asyncio.run_coroutine_threadsafe(self.claim.check(), self.claim.loop).result()
 
     def request(self, url, method, **kwargs):
-        # This also fences cached tokens and authentication/discovery requests.
+        # SQL ownership and existing caller Trust authority are independent fences.
+        self._check_claim()
         _verify_current(self.grant)
+        if method.upper() == "POST":
+            # An accepted POST may have lost its response. Only the durable intent
+            # observer may recover it; SDK reconnect/status retry must not replay it.
+            kwargs.update(
+                connect_retries=0, status_code_retries=0, retriable_status_codes=[], redirect=False, allow_reauth=False
+            )
         return super().request(url, method, **kwargs)
+
+    def _send_request(self, url, method, *args, **kwargs):
+        # Recheck after slow authority/auth/discovery and on each native retry.
+        self._check_claim()
+        return super()._send_request(url, method, *args, **kwargs)
 
 
 def _create_trust(token: str, grant: ExecutionGrant) -> ExecutionGrant:
@@ -355,11 +409,17 @@ def _close_connection(conn) -> None:
 @contextlib.asynccontextmanager
 async def execution_connection(grant_id: str | None, project_id: str, server_id: str, user_id: str, purpose: str):
     grant = await load_grant(grant_id, project_id, server_id, user_id, purpose)
-    conn = await asyncio.to_thread(_open_connection, grant)
+    opening = asyncio.create_task(asyncio.to_thread(_open_connection, grant))
+    try:
+        conn = await drain_task(opening)
+    except asyncio.CancelledError:
+        if not opening.cancelled() and opening.exception() is None:
+            await drain_thread(_close_connection, opening.result())
+        raise
     try:
         yield conn
     finally:
-        await asyncio.shield(asyncio.to_thread(_close_connection, conn))
+        await drain_thread(_close_connection, conn)
 
 
 @contextlib.asynccontextmanager
@@ -403,7 +463,7 @@ async def _cleanup_grant(grant_id: str) -> bool:
         row.updated_at = datetime.now(UTC)
         trust_id, trustee_user_id = row.trust_id, row.trustee_user_id
     try:
-        await asyncio.to_thread(_revoke_trust, trust_id, trustee_user_id)
+        await drain_thread(_revoke_trust, trust_id, trustee_user_id)
     except Exception as exc:
         _logger.warning("execution stage=cleanup status=pending error_type=%s", type(exc).__name__)
         return False
@@ -436,11 +496,18 @@ async def cleanup_one_grant() -> bool:
             WaygateJob.status.in_(("completed", "failed")),
         )
     )
+    running = exists(
+        select(WaygateJob.id).where(
+            WaygateJob.execution_grant_id == WaygateExecutionGrant.id,
+            WaygateJob.status == "running",
+        )
+    )
     async with _factory()() as session:
         grant_id = (
             await session.execute(
                 select(WaygateExecutionGrant.id)
                 .where(
+                    ~running,
                     or_(
                         (WaygateExecutionGrant.status == "cleanup_pending")
                         & (WaygateExecutionGrant.updated_at <= now - _CLEANUP_INTERVAL),

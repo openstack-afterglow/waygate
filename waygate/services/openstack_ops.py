@@ -153,13 +153,3 @@ def _extract_fixed_ip(server) -> str | None:
     return None
 
 
-async def _allocate_new_fip(conn, server_id: str, floating_network_id: str) -> tuple[str, str]:
-    ports = await asyncio.to_thread(lambda: list(conn.network.ports(device_id=server_id)))
-    if not ports:
-        raise RuntimeError(f"서버 {server_id}에 네트워크 포트가 없습니다")
-    floating_ip = await asyncio.to_thread(
-        conn.network.create_ip,
-        floating_network_id=floating_network_id,
-        port_id=ports[0].id,
-    )
-    return floating_ip.floating_ip_address, floating_ip.id

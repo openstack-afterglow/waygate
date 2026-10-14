@@ -20,6 +20,9 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
+import socket
+import sys
 import threading
 import time
 import uuid
@@ -39,7 +42,7 @@ from waygate.config import get_settings
 from waygate.main import app
 from waygate.models.orm import ResourcePolicy, WaygateClient, WaygateExecutionGrant, WaygateJob, WaygateServer
 from waygate.scripts import migrate
-from waygate.services import k3s_crypto, openstack_ops, waygate_jobs, waygate_keys
+from waygate.services import execution, k3s_crypto, openstack_ops, waygate_jobs, waygate_keys
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,6 +104,9 @@ class SyntheticCloud:
         self.server_bodies: list[dict] = []
         self.ports: dict[str, dict] = {}
         self.groups: dict[str, dict] = {}
+        self.accepted_create_faults: dict[str, str] = {}
+        self.hidden_observations: set[str] = set()
+        self.fail_security_group_listing = False
 
     # Keystone ---------------------------------------------------------
     def closure(self, names) -> set[str]:
@@ -281,6 +287,18 @@ def _handler(cloud: SyntheticCloud):
             body = self.body() if method in {"POST", "PUT", "PATCH"} else {}
             with cloud.lock:
                 status, document = self.route(method, url.path.rstrip("/") or "/", query, body)
+                fault = cloud.accepted_create_faults.pop(url.path, None) if method == "POST" and status < 300 else None
+            if cloud.after_cloud_request is not None and not url.path.startswith("/v3"):
+                cloud.after_cloud_request(method, url.path)
+            if fault == "disconnect":
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            if fault in {"503", "401"}:
+                code = int(fault)
+                self.send(code, {"error": {"code": code, "message": "accepted create response unavailable"}})
+                return
             if isinstance(document, tuple):
                 self.send(status, *document)
             else:
@@ -329,8 +347,6 @@ def _handler(cloud: SyntheticCloud):
                 result = self.network(method, path.removeprefix("/network"), query, body)
             else:
                 result = 404, {"error": {"code": 404, "message": "unknown synthetic route"}}
-            if cloud.after_cloud_request is not None:
-                cloud.after_cloud_request(method, path)
             return result
 
         def identity(self, method, path, query, body, caller):
@@ -456,6 +472,7 @@ def _handler(cloud: SyntheticCloud):
                 cloud.servers[server_id] = {
                     "id": server_id,
                     "name": body["server"]["name"],
+                    "tenant_id": "project-a",
                     "status": "ACTIVE",
                     "addresses": {"provider": [{"addr": "10.0.0.5", "version": 4, "OS-EXT-IPS:type": "fixed"}]},
                     "metadata": body["server"].get("metadata") or {},
@@ -463,7 +480,8 @@ def _handler(cloud: SyntheticCloud):
                 }
                 return 202, {"server": {"id": server_id, "links": [], "adminPass": "unused"}}
             if path == "/servers/detail":
-                return 200, {"servers": []}
+                return 200, {"servers": [server for server in cloud.servers.values()
+                                         if server["id"] not in cloud.hidden_observations]}
             parts = path.split("/")
             if len(parts) >= 3 and parts[1] == "servers":
                 server = cloud.servers.get(parts[2])
@@ -524,6 +542,8 @@ def _handler(cloud: SyntheticCloud):
                     }
                 }
             if path == "/security-groups" and method == "GET":
+                if cloud.fail_security_group_listing:
+                    return 500, {"NeutronError": {"message": "synthetic pre-create failure"}}
                 return 200, {"security_groups": list(cloud.groups.values())}
             if path == "/security-groups" and method == "POST":
                 group = {
@@ -543,6 +563,7 @@ def _handler(cloud: SyntheticCloud):
                 port = {
                     "id": "port-" + uuid.uuid4().hex[:8],
                     "device_id": "",
+                    "project_id": "project-a",
                     "status": "DOWN",
                     "fixed_ips": [{"ip_address": "10.0.0.5", "subnet_id": "subnet-a"}],
                     **body["port"],
@@ -552,8 +573,15 @@ def _handler(cloud: SyntheticCloud):
             if path == "/ports" and method == "GET":
                 device = query.get("device_id", [None])[0]
                 return 200, {
-                    "ports": [port for port in cloud.ports.values() if device is None or port["device_id"] == device]
+                    "ports": [port for port in cloud.ports.values()
+                              if port["id"] not in cloud.hidden_observations
+                              and (device is None or port["device_id"] == device)]
                 }
+            if path.startswith("/ports/") and method == "GET":
+                port = cloud.ports.get(path.rsplit("/", 1)[1])
+                if port is None:
+                    return 404, {"NeutronError": {"message": "port not found"}}
+                return 200, {"port": port}
             if path.startswith("/ports/") and method == "DELETE":
                 if cloud.ports.pop(path.rsplit("/", 1)[1], None) is None:
                     return 404, {"NeutronError": {"message": "port not found"}}
@@ -656,7 +684,10 @@ async def _native(tmp_path, monkeypatch, synthetic_cloud, database_url):
             def headers(user: str) -> dict:
                 return {"X-Auth-Token": synthetic_cloud.login(user, "project-a"), "X-Project-Id": "project-a"}
 
-            yield SimpleNamespace(client=client, cloud=synthetic_cloud, headers=headers)
+            yield SimpleNamespace(
+                client=client, cloud=synthetic_cloud, headers=headers,
+                database_url=database_url, config_file=str(empty),
+            )
 
 
 async def _rows(model, **filters):
@@ -1046,3 +1077,554 @@ async def test_unusable_trust_at_admission_is_deleted_and_refused(native):
     assert native.cloud.cloud_requests == []
     assert await _rows(WaygateServer) == [] and await _rows(WaygateJob) == []
     assert [grant.status for grant in await _rows(WaygateExecutionGrant)] == ["revoked"]
+
+
+class _ThreadGate:
+    """Block a native thread without blocking the asyncio loop or cloud lock."""
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def hold(self):
+        self.entered.set()
+        assert self.release.wait(20), "native thread was not released"
+
+    async def wait(self):
+        assert await asyncio.to_thread(self.entered.wait, 10), "native thread never reached barrier"
+
+
+@contextlib.asynccontextmanager
+async def _held_job(native, monkeypatch, stage="sdk", run=None):
+    """Observe actual SDK/factory thread exit and connection-close ordering."""
+    from openstack.network.v2._proxy import Proxy as NetworkProxy
+
+    gate, exited, closes = _ThreadGate(), threading.Event(), []
+    close_connection = execution._close_connection
+
+    def close(conn):
+        closes.append(exited.is_set())
+        close_connection(conn)
+
+    monkeypatch.setattr(execution, "_close_connection", close)
+    if stage == "factory":
+        open_connection = execution._open_connection
+
+        def opening(grant):
+            try:
+                conn = open_connection(grant)
+                gate.hold()
+                return conn
+            finally:
+                exited.set()
+
+        monkeypatch.setattr(execution, "_open_connection", opening)
+    else:
+        create_port = NetworkProxy.create_port
+
+        def creating(proxy, **attrs):
+            try:
+                return create_port(proxy, **attrs)
+            finally:
+                exited.set()
+
+        def hold_port(method, path):
+            if (method, path) == ("POST", "/network/v2.0/ports"):
+                gate.hold()
+
+        monkeypatch.setattr(NetworkProxy, "create_port", creating)
+        native.cloud.after_cloud_request = hold_port
+    task = asyncio.create_task((run or waygate_jobs.process_one_job)())
+    try:
+        await gate.wait()
+        yield SimpleNamespace(task=task, gate=gate, exited=exited, closes=closes)
+    finally:
+        gate.release.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=20)
+
+
+@pytest.mark.parametrize("contenders", [2, 3])
+async def test_native_independent_heartbeat_prevents_takeover_beyond_original_lease(native, monkeypatch, contenders):
+    server_id = await _create(native)
+    clock = SimpleNamespace(now=datetime.now(UTC).replace(microsecond=0))
+    started = clock.now
+    renewed = asyncio.Event()
+    renew = waygate_jobs.Claim.renew
+
+    async def record_renewal(claim):
+        await renew(claim)
+        renewed.set()
+
+    async def wait_for_persisted_renewal(expected):
+        while True:
+            renewed.clear()
+            [job] = await _rows(WaygateJob, server_id=server_id)
+            if execution._utc(job.claimed_at) == expected:
+                return
+            await renewed.wait()
+
+    monkeypatch.setattr(waygate_jobs, "_now", lambda: clock.now)
+    monkeypatch.setattr(waygate_jobs, "_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(waygate_jobs.Claim, "renew", record_renewal)
+    async with _held_job(native, monkeypatch) as held:
+        # A blocked installed-SDK POST cannot drive renewal itself. Advance in
+        # fresh increments, waiting for independent SQL renewal at each step.
+        for _ in range(2):
+            clock.now += timedelta(seconds=600)
+            await asyncio.wait_for(wait_for_persisted_renewal(clock.now), timeout=5)
+            claims = await asyncio.gather(*(waygate_jobs._claim_one() for _ in range(contenders)))
+            assert claims == [None] * contenders
+            [job] = await _rows(WaygateJob, server_id=server_id)
+            assert (job.status, job.attempts, execution._utc(job.claimed_at)) == ("running", 1, clock.now)
+        assert clock.now > started + timedelta(seconds=900)
+        assert not held.task.done() and not held.exited.is_set()
+        assert held.closes == [] and native.cloud.trust_deletes == []
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    assert (job.status, job.attempts) == ("completed", 1)
+    assert len(native.cloud.ports) == len(native.cloud.server_bodies) == 1
+    assert held.closes == [True]
+
+
+@pytest.mark.parametrize("takeover", ["attempt", "stale"])
+async def test_native_lost_attempt_cannot_make_next_provider_mutation_or_release_lease(native, monkeypatch, takeover):
+    server_id = await _create(native)
+    now = datetime.now(UTC).replace(microsecond=0)
+    monkeypatch.setattr(waygate_jobs, "_now", lambda: now)
+    monkeypatch.setattr(waygate_jobs, "_HEARTBEAT_SECONDS", 3600)
+    async with _held_job(native, monkeypatch):
+        [job] = await _rows(WaygateJob, server_id=server_id)
+        replacement = {"attempts": 2} if takeover == "attempt" else {"claimed_at": now - timedelta(seconds=900)}
+        async with db.get_session_factory()() as session, session.begin():
+            await session.execute(update(WaygateJob).where(WaygateJob.id == job.id).values(**replacement))
+        [owned_elsewhere] = await _rows(WaygateJob, id=job.id)
+    assert native.cloud.server_bodies == []
+    assert native.cloud.cloud_requests[-1][:2] == ("POST", "/network/v2.0/ports")
+    assert await waygate_jobs._complete(job.id, attempt=1) is False
+    assert await waygate_jobs._retry_or_fail(job.id, attempt=1, error="former worker") is False
+    former = waygate_jobs.Claim(job.id, 1, "project-a", server_id)
+    with pytest.raises(execution.ClaimLost):
+        await former.renew()
+    [remaining] = await _rows(WaygateJob, id=job.id)
+    assert (remaining.status, remaining.attempts, remaining.claimed_at, remaining.last_error) == (
+        "running", owned_elsewhere.attempts, owned_elsewhere.claimed_at, None,
+    )
+    assert (await _rows(WaygateExecutionGrant))[0].status == "active"
+    assert native.cloud.trust_deletes == []
+
+
+@pytest.mark.parametrize("stage", ["sdk", "factory"])
+async def test_native_caller_cancellation_drains_owned_thread_before_close_retire_or_release(native, monkeypatch, stage):
+    server_id = await _create(native)
+    async with _held_job(native, monkeypatch, stage) as held:
+        for _ in range(2):
+            held.task.cancel()
+            await asyncio.sleep(0)
+        assert not held.task.done() and not held.exited.is_set()
+        assert held.closes == [] and native.cloud.trust_deletes == []
+        [job] = await _rows(WaygateJob, server_id=server_id)
+        assert (job.status, job.attempts) == ("running", 1)
+        assert (await _rows(WaygateExecutionGrant))[0].status == "active"
+        assert await waygate_jobs.process_one_job() is False
+        held.gate.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(held.task, timeout=20)
+    assert held.exited.is_set() and held.closes == [True]
+    assert (await _rows(WaygateJob, server_id=server_id))[0].status == "completed"
+    assert (await _rows(WaygateExecutionGrant))[0].status == "revoked"
+    assert len(native.cloud.trust_deletes) == 1
+    assert len(native.cloud.server_bodies) == len(native.cloud.ports) == 1
+
+
+async def test_native_cancelled_connection_factory_closes_only_after_factory_thread_returns(native, monkeypatch):
+    server_id = await _create(native)
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    gate, exited, closes = _ThreadGate(), threading.Event(), []
+    open_connection, close_connection = execution._open_connection, execution._close_connection
+
+    def opening(grant):
+        try:
+            conn = open_connection(grant)
+            gate.hold()
+            return conn
+        finally:
+            exited.set()
+
+    def close(conn):
+        closes.append(exited.is_set())
+        close_connection(conn)
+
+    async def connect():
+        async with execution.execution_connection(job.execution_grant_id, "project-a", server_id, "user-a", "provision"):
+            pytest.fail("cancelled factory must not yield its connection")
+
+    monkeypatch.setattr(execution, "_open_connection", opening)
+    monkeypatch.setattr(execution, "_close_connection", close)
+    task = asyncio.create_task(connect())
+    try:
+        await gate.wait()
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done() and not exited.is_set() and closes == []
+        assert native.cloud.trust_deletes == []
+        assert (await _rows(WaygateJob, id=job.id))[0].status == "queued"
+    finally:
+        gate.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=20)
+    assert exited.is_set() and closes == [True]
+    assert (await _rows(WaygateExecutionGrant))[0].status == "active"
+
+
+@pytest.mark.parametrize("kind,path", [("port", "/network/v2.0/ports"), ("vm", "/compute/v2.1/servers")])
+@pytest.mark.parametrize("fault", ["disconnect", "503", "401"])
+async def test_native_accepted_create_response_failure_recovers_without_second_post(native, monkeypatch, kind, path, fault):
+    server_id = await _create(native)
+    open_connection = execution._open_connection
+
+    def retrying_connection(grant):
+        conn = open_connection(grant)
+        for proxy in (conn.network, conn.compute):
+            proxy.status_code_retries = 2
+            proxy.retriable_status_codes = [503]
+            proxy.status_code_retry_delay = 0
+        return conn
+
+    # Native POST overrides must prevent both configured 503 retries and the
+    # independent keystoneauth 401 reauthentication replay after acceptance.
+    monkeypatch.setattr(execution, "_open_connection", retrying_connection)
+    native.cloud.accepted_create_faults[path] = fault
+    assert await waygate_jobs.process_one_job() is True
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    [server] = await _rows(WaygateServer, id=server_id)
+    assert (job.status, job.attempts) == ("queued", 1)
+    intent = server.resource_policy_snapshot["waygate.provision_intents"][kind]
+    assert intent["marker"] and not intent.get("resource_id")
+    accepted_id = next(iter(native.cloud.ports if kind == "port" else native.cloud.servers))
+    credential = server.agent_token_encrypted
+    assert len([request for request in native.cloud.cloud_requests if request[:2] == ("POST", path)]) == 1
+    assert (await _rows(WaygateExecutionGrant))[0].status == "active"
+    assert await waygate_jobs.process_one_job() is True
+    assert await waygate_jobs.process_one_job() is False
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    [server] = await _rows(WaygateServer, id=server_id)
+    assert (job.status, job.attempts, server.status) == ("completed", 2, "PROVISIONING")
+    assert server.resource_policy_snapshot["waygate.provision_intents"][kind]["resource_id"] == accepted_id
+    assert len(native.cloud.ports) == len(native.cloud.servers) == len(native.cloud.server_bodies) == 1
+    assert len([request for request in native.cloud.cloud_requests if request[:2] == ("POST", path)]) == 1
+    if kind == "vm":
+        assert credential and server.agent_token_encrypted == credential
+    assert (await _rows(WaygateExecutionGrant))[0].status == "revoked"
+
+
+@pytest.mark.parametrize("shutdown_signal", [signal.SIGTERM, signal.SIGINT])
+async def test_native_worker_process_signal_drains_sdk_before_database_shutdown(native, shutdown_signal):
+    server_id = await _create(native)
+    gate = _ThreadGate()
+
+    def hold_port(method, path):
+        if (method, path) == ("POST", "/network/v2.0/ports"):
+            gate.hold()
+
+    native.cloud.after_cloud_request = hold_port
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "waygate.worker",
+        env={**os.environ, "DATABASE_URL": native.database_url, "WAYGATE_CONFIG_FILE": native.config_file},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        await gate.wait()
+        process.send_signal(shutdown_signal)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(process.wait(), timeout=0.1)
+        # Read the durable state while the actual process is draining native
+        # HTTP. No signal-driven cancellation may close or release ownership.
+        [job] = await _rows(WaygateJob, server_id=server_id)
+        assert (job.status, job.attempts) == ("running", 1)
+        assert process.returncode is None
+        assert native.cloud.trust_deletes == []
+        assert await waygate_jobs._claim_one() is None
+        gate.release.set()
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+        assert process.returncode == 0, output.decode()
+        assert "worker stage=shutdown status=stopped" in output.decode()
+    finally:
+        gate.release.set()
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    assert (job.status, job.attempts) == ("completed", 1)
+    assert (await _rows(WaygateExecutionGrant))[0].status == "revoked"
+    assert len(native.cloud.ports) == len(native.cloud.server_bodies) == 1
+
+
+@pytest.mark.parametrize("takeover", ["attempt", "stale"])
+async def test_native_takeover_during_authority_check_blocks_final_http_send(native, monkeypatch, takeover):
+    server_id = await _create(native)
+    now = datetime.now(UTC).replace(microsecond=0)
+    monkeypatch.setattr(waygate_jobs, "_now", lambda: now)
+    claimed = await waygate_jobs._claim_one()
+    claim = waygate_jobs.Claim(claimed[0], claimed[1], "project-a", server_id)
+    token = execution.current_claim.set(claim)
+    gate = _ThreadGate()
+    verify_current = execution._verify_current
+
+    def slow_verify(grant):
+        verify_current(grant)
+        gate.hold()
+
+    try:
+        async with execution.execution_connection(claimed[7], "project-a", server_id, "user-a", "provision") as conn:
+            # Warm native discovery before holding the POST's authority check.
+            await execution.drain_thread(lambda: conn.network.get_network(NETWORK))
+            before = len(native.cloud.cloud_requests)
+            monkeypatch.setattr(execution, "_verify_current", slow_verify)
+            task = asyncio.create_task(execution.drain_thread(lambda: conn.network.create_port(network_id=NETWORK)))
+            try:
+                await gate.wait()
+                replacement = {"attempts": 2} if takeover == "attempt" else {
+                    "claimed_at": now - timedelta(seconds=900),
+                }
+                async with db.get_session_factory()() as session, session.begin():
+                    await session.execute(update(WaygateJob).where(WaygateJob.id == claim.job_id).values(**replacement))
+            finally:
+                gate.release.set()
+                with pytest.raises(execution.ClaimLost):
+                    await asyncio.wait_for(task, timeout=20)
+            assert native.cloud.cloud_requests[before:] == []
+            assert native.cloud.ports == {} and claim.lost is True
+    finally:
+        execution.current_claim.reset(token)
+    assert native.cloud.trust_deletes == []
+    assert (await _rows(WaygateExecutionGrant))[0].status == "active"
+
+
+async def test_native_direct_sdk_cancellation_drains_before_connection_close(native, monkeypatch):
+    server_id = await _create(native)
+    claimed = await waygate_jobs._claim_one()
+    claim = waygate_jobs.Claim(claimed[0], claimed[1], "project-a", server_id)
+
+    async def create_port():
+        token = execution.current_claim.set(claim)
+        try:
+            async with execution.execution_connection(claimed[7], "project-a", server_id, "user-a", "provision") as conn:
+                await execution.drain_thread(lambda: conn.network.create_port(network_id=NETWORK))
+        finally:
+            execution.current_claim.reset(token)
+
+    async with _held_job(native, monkeypatch, run=create_port) as held:
+        for _ in range(2):
+            held.task.cancel()
+            await asyncio.sleep(0)
+        assert not held.task.done() and not held.exited.is_set()
+        assert held.closes == [] and native.cloud.trust_deletes == []
+        [job] = await _rows(WaygateJob, id=claim.job_id)
+        assert (job.status, job.attempts) == ("running", 1)
+        assert await waygate_jobs.process_one_job() is False
+        held.gate.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(held.task, timeout=20)
+    assert held.exited.is_set() and held.closes == [True]
+    assert len(native.cloud.ports) == 1 and native.cloud.server_bodies == []
+    assert (await _rows(WaygateJob, id=claim.job_id))[0].status == "running"
+    assert (await _rows(WaygateExecutionGrant))[0].status == "active"
+
+
+@pytest.mark.parametrize("kind,path", [("port", "/network/v2.0/ports"), ("vm", "/compute/v2.1/servers")])
+@pytest.mark.parametrize("observations", [0, 2])
+async def test_native_unresolved_create_intent_never_reposts_or_rolls_back_on_exhaustion(native, kind, path, observations):
+    server_id = await _create(native)
+    native.cloud.accepted_create_faults[path] = "disconnect"
+    assert await waygate_jobs.process_one_job() is True
+    [server] = await _rows(WaygateServer, id=server_id)
+    intent = dict(server.resource_policy_snapshot["waygate.provision_intents"][kind])
+    assert intent["marker"] and not intent.get("resource_id")
+    resources = native.cloud.ports if kind == "port" else native.cloud.servers
+    [accepted_id] = resources
+    if observations == 0:
+        # Eventual-consistency absence is not proof that POST was rejected.
+        native.cloud.hidden_observations.add(accepted_id)
+    else:
+        # Even two same-project resources bearing the exact marker are not a
+        # unique target. Neither may be adopted or compensatingly deleted.
+        duplicate_id = "duplicate-" + accepted_id
+        resources[duplicate_id] = {**resources[accepted_id], "id": duplicate_id}
+    observed_ids = set(resources)
+    credential = server.agent_token_encrypted
+    for attempt, status in ((2, "queued"), (3, "failed")):
+        assert await waygate_jobs.process_one_job() is True
+        [job] = await _rows(WaygateJob, server_id=server_id)
+        [server] = await _rows(WaygateServer, id=server_id)
+        assert (job.status, job.attempts) == (status, attempt)
+        assert server.resource_policy_snapshot["waygate.provision_intents"][kind] == intent
+        assert set(resources) == observed_ids
+        assert len([request for request in native.cloud.cloud_requests if request[:2] == ("POST", path)]) == 1
+        assert not any(method == "DELETE" for method, _path, _caller in native.cloud.cloud_requests)
+        if kind == "vm":
+            assert credential and server.agent_token_encrypted == credential
+        else:
+            assert native.cloud.server_bodies == []
+    assert await waygate_jobs.process_one_job() is False
+    assert (await _rows(WaygateExecutionGrant))[0].status == "revoked"
+
+
+async def test_native_authorized_immediate_delete_tombstones_never_started_provision_without_cloud_post(native):
+    server_id = await _create(native)
+    response = await native.client.delete(f"/v1/servers/{server_id}", headers=native.headers("user-b"))
+    assert response.status_code == 202, response.text
+    assert await waygate_jobs.process_one_job() is True
+    [server] = await _rows(WaygateServer, id=server_id)
+    [provision] = await _rows(WaygateJob, server_id=server_id, kind="provision")
+    [deletion] = await _rows(WaygateJob, server_id=server_id, kind="delete")
+    assert (server.status, server.deleted_by_user_id) == ("DELETED", "user-b")
+    assert server.deleted_at is not None
+    assert (provision.status, provision.attempts) == ("failed", 0)
+    assert provision.last_error == "Waygate provisioning superseded by deletion"
+    assert (deletion.status, deletion.attempts) == ("completed", 1)
+    assert native.cloud.ports == {} and native.cloud.servers == {}
+    assert not any(method == "POST" for method, _path, _caller in native.cloud.cloud_requests)
+
+
+@pytest.mark.parametrize("history", ["missing", "attempted"])
+async def test_native_no_intent_delete_without_zero_attempt_history_remains_unresolved(native, history):
+    server_id = await _create(native)
+    async with db.get_session_factory()() as session, session.begin():
+        provision = (await session.execute(select(WaygateJob).where(
+            WaygateJob.server_id == server_id, WaygateJob.kind == "provision",
+        ))).scalar_one()
+        if history == "missing":
+            await session.delete(provision)
+        else:
+            provision.attempts = 1
+            provision.status = "failed"
+    response = await native.client.delete(f"/v1/servers/{server_id}", headers=native.headers("user-b"))
+    assert response.status_code == 202, response.text
+    assert await waygate_jobs.process_one_job() is True
+    [server] = await _rows(WaygateServer, id=server_id)
+    [deletion] = await _rows(WaygateJob, server_id=server_id, kind="delete")
+    assert server.deleted_at is None and server.status == "DELETING"
+    assert (deletion.status, deletion.attempts) == ("queued", 1)
+    assert "operator identity reconciliation" in deletion.last_error
+    assert not any(method in {"POST", "DELETE"} for method, _path, _caller in native.cloud.cloud_requests)
+    assert native.cloud.ports == {} and native.cloud.servers == {}
+
+
+@pytest.mark.parametrize("resolution", ["retry", "delete"])
+async def test_native_admitted_protocol_recovers_failure_before_first_create(native, resolution):
+    server_id = await _create(native)
+    native.cloud.fail_security_group_listing = True
+    assert await waygate_jobs.process_one_job() is True
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    [server] = await _rows(WaygateServer, id=server_id)
+    admission = server.resource_policy_snapshot["waygate.provision_protocol"]
+    assert admission == {
+        "version": 1, "job_id": job.id, "project_id": "project-a", "server_id": server_id,
+    }
+    assert (job.status, job.attempts) == ("queued", 1)
+    assert not server.resource_policy_snapshot.get("waygate.provision_intents")
+    assert native.cloud.groups == native.cloud.ports == native.cloud.servers == {}
+    assert not any(method == "POST" for method, _path, _caller in native.cloud.cloud_requests)
+
+    native.cloud.fail_security_group_listing = False
+    if resolution == "delete":
+        response = await native.client.delete(f"/v1/servers/{server_id}", headers=native.headers("user-b"))
+        assert response.status_code == 202, response.text
+        assert await waygate_jobs.process_one_job() is True
+        [server] = await _rows(WaygateServer, id=server_id)
+        [provision] = await _rows(WaygateJob, server_id=server_id, kind="provision")
+        [deletion] = await _rows(WaygateJob, server_id=server_id, kind="delete")
+        assert server.status == "DELETED" and server.deleted_at is not None
+        assert (provision.status, provision.attempts) == ("failed", 1)
+        assert (deletion.status, deletion.attempts) == ("completed", 1)
+        assert server.resource_policy_snapshot["waygate.provision_protocol"] == admission
+        assert native.cloud.groups == native.cloud.ports == native.cloud.servers == {}
+        assert not any(method == "POST" for method, _path, _caller in native.cloud.cloud_requests)
+        return
+    assert await waygate_jobs.process_one_job() is True
+    [job] = await _rows(WaygateJob, server_id=server_id)
+    [server] = await _rows(WaygateServer, id=server_id)
+    assert (job.status, job.attempts, server.status) == ("completed", 2, "PROVISIONING")
+    assert server.resource_policy_snapshot["waygate.provision_protocol"] == admission
+    assert len(native.cloud.ports) == len(native.cloud.server_bodies) == 1
+    intents = server.resource_policy_snapshot["waygate.provision_intents"]
+    assert intents["port"]["resource_id"] == server.provider_port_id
+    assert intents["vm"]["resource_id"] == server.server_vm_id
+    assert (await _rows(WaygateExecutionGrant))[0].status == "revoked"
+
+
+@pytest.mark.parametrize("provenance", [
+    "missing", "unsupported", "bool-version", "string-version", "float-version",
+    "foreign-job", "foreign-project", "foreign-server",
+])
+async def test_native_legacy_or_unbound_protocol_never_retrofits_create_admission(native, provenance):
+    server_id = await _create(native)
+    async with db.get_session_factory()() as session, session.begin():
+        job = (await session.execute(select(WaygateJob).where(
+            WaygateJob.server_id == server_id, WaygateJob.kind == "provision",
+        ))).scalar_one()
+        job.attempts = 1
+        server = await session.get(WaygateServer, server_id)
+        snapshot = dict(server.resource_policy_snapshot)
+        if provenance != "missing":
+            admission = {
+                "version": 1, "job_id": job.id, "project_id": "project-a", "server_id": server_id,
+            }
+            field, value = {
+                "unsupported": ("version", 2),
+                "bool-version": ("version", True),
+                "string-version": ("version", "1"),
+                "float-version": ("version", 1.0),
+                "foreign-job": ("job_id", "other-job"),
+                "foreign-project": ("project_id", "other-project"),
+                "foreign-server": ("server_id", "other-server"),
+            }[provenance]
+            admission[field] = value
+            snapshot["waygate.provision_protocol"] = admission
+            server.resource_policy_snapshot = snapshot
+        original_snapshot = dict(snapshot)
+    for attempt, status in ((2, "queued"), (3, "failed")):
+        assert await waygate_jobs.process_one_job() is True
+        [job] = await _rows(WaygateJob, server_id=server_id)
+        [server] = await _rows(WaygateServer, id=server_id)
+        assert (job.status, job.attempts) == (status, attempt)
+        assert "operator identity reconciliation" in job.last_error
+        assert server.resource_policy_snapshot == original_snapshot
+        assert native.cloud.groups == native.cloud.ports == native.cloud.servers == {}
+        assert not any(method in {"POST", "DELETE"} for method, _path, _caller in native.cloud.cloud_requests)
+
+
+@pytest.mark.parametrize("kind", ["provision", "delete"])
+async def test_native_stale_retry_attempt_cannot_write_server_status_after_takeover(native, monkeypatch, kind):
+    server_id = await _create(native)
+    if kind == "delete":
+        response = await native.client.delete(f"/v1/servers/{server_id}", headers=native.headers("user-b"))
+        assert response.status_code == 202, response.text
+    async with db.get_session_factory()() as session, session.begin():
+        for job in (await session.execute(select(WaygateJob).where(WaygateJob.server_id == server_id))).scalars():
+            if job.kind == kind:
+                job.attempts, job.status = 1, "queued"
+            else:
+                job.status = "failed"
+        server = await session.get(WaygateServer, server_id)
+        server.status, server.status_reason = "ERROR", "previous attempt failed"
+    real_check = waygate_jobs.Claim.check
+
+    async def paused_then_replaced(claim):
+        await real_check(claim)
+        # The retry write follows this lifecycle check; a peer replaces the
+        # attempt while the original worker is paused before that SQL write.
+        if sys._getframe(1).f_code.co_name == "_execute_claimed" and claim.attempt == 2:
+            async with db.get_session_factory()() as session, session.begin():
+                current = await session.get(WaygateJob, claim.job_id, with_for_update=True)
+                current.attempts, current.claimed_at = 3, datetime.now(UTC)
+
+    monkeypatch.setattr(waygate_jobs.Claim, "check", paused_then_replaced)
+    assert await waygate_jobs.process_one_job() is True
+    [job] = await _rows(WaygateJob, server_id=server_id, kind=kind)
+    [server] = await _rows(WaygateServer, id=server_id)
+    assert (job.status, job.attempts) == ("running", 3)
+    assert (server.status, server.status_reason, server.deleted_at) == ("ERROR", "previous attempt failed", None)
+    assert (await _rows(WaygateExecutionGrant, id=job.execution_grant_id))[0].status == "active"
+    assert not any(method in {"POST", "DELETE"} for method, _path, _caller in native.cloud.cloud_requests)

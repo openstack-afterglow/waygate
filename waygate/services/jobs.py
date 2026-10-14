@@ -1,13 +1,15 @@
 """Durable Waygate provision/delete queue.
 
 The database is authoritative. Workers claim one row transactionally with
-``FOR UPDATE SKIP LOCKED`` and may reclaim a lease after 15 minutes.
+``FOR UPDATE SKIP LOCKED`` and renew its 15-minute lease during provider I/O.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import exists, or_, select
@@ -16,15 +18,89 @@ from sqlalchemy.orm import aliased
 from waygate.db import get_session_factory
 from waygate.models.orm import WaygateExecutionGrant, WaygateJob, WaygateServer
 from waygate.services import execution, waygate_db
-from waygate.services.provisioner import delete_waygate_server, provision_waygate_server
+from waygate.services.provisioner import (
+    _INTENTS,
+    _PROTOCOL,
+    _update,
+    delete_waygate_server,
+    provision_waygate_server,
+)
 
 _logger = logging.getLogger(__name__)
 _LEASE_SECONDS = 900
+_HEARTBEAT_SECONDS = 30
 _MAX_ATTEMPTS = 3
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+
+def _owns(job, attempt: int) -> bool:
+    return (
+        job is not None
+        and job.status == "running"
+        and job.attempts == attempt
+        and job.claimed_at is not None
+        and execution._utc(job.claimed_at) > _now() - timedelta(seconds=_LEASE_SECONDS)
+    )
+
+
+@dataclass
+class Claim:
+    job_id: str
+    attempt: int
+    project_id: str
+    server_id: str
+    loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop)
+    lost: bool = False
+
+    async def locked_job(self, session):
+        job = await session.get(WaygateJob, self.job_id, with_for_update=True)
+        if self.lost or not _owns(job, self.attempt) or (
+            job.project_id, job.server_id
+        ) != (self.project_id, self.server_id):
+            self.lost = True
+            raise execution.ClaimLost("Waygate job lease was lost or expired")
+        return job
+
+    async def check(self):
+        try:
+            factory = get_session_factory()
+            if factory is None:
+                raise execution.ClaimLost("Waygate job ownership is unavailable")
+            async with factory() as session, session.begin():
+                await self.locked_job(session)
+        except Exception:
+            self.lost = True
+            raise
+
+    async def renew(self):
+        try:
+            factory = get_session_factory()
+            if factory is None:
+                raise execution.ClaimLost("Waygate job ownership is unavailable")
+            async with factory() as session, session.begin():
+                job = await self.locked_job(session)
+                job.claimed_at = _now()
+                job.updated_at = job.claimed_at
+        except Exception:
+            self.lost = True
+            raise
+
+    async def heartbeat(self, stop: asyncio.Event):
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=_HEARTBEAT_SECONDS)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await self.renew()
+            except Exception as exc:
+                _logger.info("job stage=renew status=lease_lost error_type=%s", type(exc).__name__)
+                return
 
 
 async def _lock_execution_grant(
@@ -194,14 +270,14 @@ async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None,
                             WaygateJob.status == "queued",
                             (WaygateJob.status == "running")
                             & (WaygateJob.claimed_at.is_not(None))
-                            & (WaygateJob.claimed_at < stale_before),
+                            & (WaygateJob.claimed_at <= stale_before),
                         ),
                         ~exists(
                             select(active_job.id).where(
                                 active_job.server_id == WaygateJob.server_id,
                                 active_job.status == "running",
                                 active_job.claimed_at.is_not(None),
-                                active_job.claimed_at >= stale_before,
+                                active_job.claimed_at > stale_before,
                             )
                         ),
                     )
@@ -227,7 +303,7 @@ async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None,
                         WaygateJob.id != job.id,
                         WaygateJob.status == "running",
                         WaygateJob.claimed_at.is_not(None),
-                        WaygateJob.claimed_at >= stale_before,
+                        WaygateJob.claimed_at > stale_before,
                     )
                     .limit(1)
                 )
@@ -278,6 +354,24 @@ async def _claim_one() -> tuple[str, int, str, str, str, str | None, str | None,
                 job.updated_at = now
                 await _mark_server_failed(session, job, error)
                 continue
+            if job.kind == "provision" and job.attempts == 0:
+                snapshot = dict(server.resource_policy_snapshot or {})
+                if (
+                    _PROTOCOL not in snapshot
+                    and server.project_id == job.project_id
+                    and not snapshot.get(_INTENTS)
+                    and not any((server.provider_port_id, server.server_vm_id, server.fip_id))
+                ):
+                    # Commit admission with the first attempt, before any factory
+                    # or SDK work. Never retrofit this proof onto attempted legacy
+                    # rows: their missing identity may hide an accepted create.
+                    snapshot[_PROTOCOL] = {
+                        "version": 1,
+                        "job_id": job.id,
+                        "project_id": job.project_id,
+                        "server_id": job.server_id,
+                    }
+                    server.resource_policy_snapshot = snapshot
             job.status = "running"
             job.claimed_at = now
             job.attempts += 1
@@ -300,7 +394,7 @@ async def _complete(job_id: str, *, attempt: int) -> bool:
         raise RuntimeError("Waygate database is unavailable")
     async with factory() as session, session.begin():
         job = await session.get(WaygateJob, job_id, with_for_update=True)
-        if job is None or job.status != "running" or job.attempts != attempt:
+        if not _owns(job, attempt):
             return False
         job.status = "completed"
         job.claimed_at = None
@@ -316,7 +410,7 @@ async def _retry_or_fail(job_id: str, *, attempt: int, error: str, terminal: boo
     clean_error = (error.strip() or "Waygate job failed")[:4096]
     async with factory() as session, session.begin():
         job = await session.get(WaygateJob, job_id, with_for_update=True)
-        if job is None or job.status != "running" or job.attempts != attempt:
+        if not _owns(job, attempt):
             return False
         job.last_error = clean_error
         job.claimed_at = None
@@ -337,16 +431,36 @@ async def process_one_job() -> bool:
         _logger.debug("job query=claim result=%s", "none" if claimed is None else "found")
     if claimed is None:
         return cleaned
+    claim = Claim(claimed[0], claimed[1], claimed[3], claimed[4])
+    await execution.drain_task(asyncio.create_task(_process_claimed(claim, claimed)))
+    return True
+
+
+async def _process_claimed(claim: Claim, claimed) -> None:
+    token = execution.current_claim.set(claim)
+    stop = asyncio.Event()
+    heartbeat = asyncio.create_task(claim.heartbeat(stop))
+    try:
+        await _execute_claimed(claim, claimed)
+    finally:
+        stop.set()
+        await execution.drain_task(heartbeat)
+        execution.current_claim.reset(token)
+
+
+async def _execute_claimed(claim: Claim, claimed) -> None:
     job_id, attempt, kind, project_id, server_id, user_id, username, grant_id = claimed
     _logger.info("job stage=claimed kind=%s attempt=%d status=running", kind, attempt)
     try:
         async with execution.execution_connection(grant_id, project_id, server_id, user_id or "", kind) as conn:
+            await claim.check()
             if kind == "provision":
                 if attempt > 1:
-                    await waygate_db.update_server_status(
+                    await _update(
                         server_id, "CREATING", "프로비저닝 재시도 중", only_if_status="ERROR"
                     )
                 await provision_waygate_server(project_id, server_id, user_id or "", username or "", conn=conn)
+                await claim.check()
                 server = await waygate_db.get_server_by_id(server_id)
                 if server is None:
                     raise RuntimeError("Waygate server disappeared during provisioning")
@@ -354,14 +468,20 @@ async def process_one_job() -> bool:
                     raise RuntimeError(server.get("status_reason") or f"unexpected server status: {server['status']}")
             elif kind == "delete":
                 if attempt > 1:
-                    await waygate_db.update_server_status(server_id, "DELETING", "삭제 재시도 중")
+                    await _update(server_id, "DELETING", "삭제 재시도 중")
                 await delete_waygate_server(project_id, server_id, user_id or "", conn=conn)
+                await claim.check()
                 state = await waygate_db.get_server_deletion_state(project_id, server_id)
                 if state != ("DELETED", True):
                     raise RuntimeError(f"Waygate server deletion did not reach terminal state: {state}")
             else:
                 raise RuntimeError(f"unsupported Waygate job kind: {kind}")
+    except execution.ClaimLost:
+        _logger.info("job stage=finish kind=%s attempt=%d status=lease_lost", kind, attempt)
     except Exception as exc:
+        if claim.lost:
+            _logger.info("job stage=finish kind=%s attempt=%d status=lease_lost", kind, attempt)
+            return
         terminal = isinstance(exc, execution.ExecutionDenied)
         retried = await _retry_or_fail(job_id, attempt=attempt, error=str(exc), terminal=terminal)
         if retried and (terminal or attempt >= _MAX_ATTEMPTS) and grant_id:
@@ -374,6 +494,9 @@ async def process_one_job() -> bool:
             type(exc).__name__,
         )
     else:
+        if claim.lost:
+            _logger.info("job stage=finish kind=%s attempt=%d status=lease_lost", kind, attempt)
+            return
         # A failed completion write is not a failed cloud operation. Leave the
         # lease intact so a later claim can reconcile a committed tombstone.
         completed = await _complete(job_id, attempt=attempt)
@@ -387,4 +510,3 @@ async def process_one_job() -> bool:
         )
     if _logger.isEnabledFor(logging.DEBUG):
         _logger.debug("job query=transition result=recorded kind=%s", kind)
-    return True

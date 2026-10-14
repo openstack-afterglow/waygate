@@ -68,11 +68,11 @@ async def test_debug_is_opt_in_and_scoped_to_waygate(monkeypatch):
 
 
 async def test_worker_iteration_failure_logs_type_not_exception_value(monkeypatch, caplog):
+    stop = asyncio.Event()
     async def broken_job():
+        stop.set()
         raise RuntimeError("bootstrap-secret raw SQL values")
 
-    async def stop_after_iteration(_seconds):
-        raise KeyboardInterrupt
 
     monkeypatch.setattr(worker, "get_settings", lambda: type("Settings", (), {
         "database_url": "sqlite://", "database_pool_size": 1, "database_max_overflow": 0,
@@ -81,15 +81,13 @@ async def test_worker_iteration_failure_logs_type_not_exception_value(monkeypatc
     monkeypatch.setattr(worker, "require_public_callback_base_url", lambda _settings: None)
     monkeypatch.setattr(worker, "init_db", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker, "process_one_job", broken_job)
-    monkeypatch.setattr(worker.asyncio, "sleep", stop_after_iteration)
 
     async def close_db():
         pass
 
     monkeypatch.setattr(worker, "close_db", close_db)
     with caplog.at_level(logging.INFO, logger="waygate.worker"):
-        with pytest.raises(KeyboardInterrupt):
-            await worker.serve()
+        await worker.serve(stop)
     messages = " ".join(_messages(caplog, "waygate.worker"))
     assert "stage=ready status=started" in messages
     assert "stage=poll status=failed error_type=RuntimeError" in messages
@@ -98,7 +96,7 @@ async def test_worker_iteration_failure_logs_type_not_exception_value(monkeypatc
 
 
 @pytest.mark.parametrize("shutdown_signal", [signal.SIGTERM, signal.SIGINT])
-async def test_worker_signal_exits_cleanly_during_pending_database_connection(tmp_path, shutdown_signal):
+async def test_worker_signal_drains_pending_database_connection_before_exit(tmp_path, shutdown_signal):
     config = tmp_path / "waygate.conf"
     config.write_text('[waygate]\ncallback_base_url = "https://worker-test.invalid"\n')
     loop = asyncio.get_running_loop()
@@ -123,6 +121,10 @@ async def test_worker_signal_exits_cleanly_during_pending_database_connection(tm
         try:
             connection, _ = await asyncio.wait_for(loop.sock_accept(listener), timeout=10)
             process.send_signal(shutdown_signal)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=0.1)
+            connection.close()
+            connection = None
             output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
             assert process.returncode == 0, output.decode()
         finally:
