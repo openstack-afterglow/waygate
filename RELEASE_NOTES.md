@@ -1,3 +1,25 @@
+# Waygate 0.3.6 — standard project authority candidate
+
+## 한국어
+- **버전/일자:** 0.3.6; 준비 2026-11-04 UTC. 발행/운영 배포 일시: 아직 없음.
+- **변경/수정:** 전용 서비스 role 없이 현재 project member/manager/admin이 소유 자원을 관리하고 reader는 비밀 없는 inventory를 조회한다. `/v1/policy/capabilities`, per-action oslo.policy, 원본 제한 credential 교집합, native effective role-ID graph 및 실제 보유 core role Trust를 사용한다. manager 단독도 member를 새로 부여하지 않고 provider 작업을 수행한다. Private profile, global system, agent bearer, SQL claim/replay와0.3.5 Sentinel 경계를 유지한다.
+- **폐기/제거:** 전용 Waygate role 필수 조건과 project manager/admin 일괄 거절. 기존 role/assignment 삭제 없음. 그 외 없음.
+
+## English
+- **Version/date:** 0.3.6; prepared 2026-11-04 UTC. Publication/deployment dates: None yet.
+- **Changes/fixes:** Standard current project member/manager/admin management and reader nonsecret inventory; native per-action policy/capability discovery; original credential attenuation and actual held-role provider Trusts. Manager alone works without inventing member. Preserve private profiles, separate system/agent authority, SQL claim/replay and0.3.5 Sentinel boundaries.
+- **Deprecated/removed:** Dedicated Waygate-role prerequisites and blanket project manager/admin rejection. No existing role assignments are deleted. Other: None.
+
+## Candidate and cutover boundaries
+
+Base is immutable published `v0.3.5`, commit `1886a8ed7e7af4ac812a8579901fe18f31c8b034`; the shared primary checkout's unrelated policy/admin-executor/job WIP is not a release source. Root/runtime/lock/Kolla registry default are0.3.6; SDK stays0.2.0. Canonical publication accepts numeric `0.3.6` and historical `v*` tags, with semver metadata producing image tag0.3.6. Existing tags/images are never moved. CI gates API/worker images; GitHub Release and same-source wheel upload are manual owner actions. The stale source-build pin remains explicit: source-mode deployment must override it with the qualified immutable release commit.
+
+Production read-only evidence supplied by the integrating owner found immutable007_admin_execution already applied with SHA256 `2dd4d14afa2a5a50aa853d0e4101dc044f5d7858bc57889245d0ebbe1a9f47fb` and zero grant rows. This candidate includes that exact migration and ORM columns for compatibility, not a new dedicated executor feature. Older001–006 installations must apply007 before these processes; current007 installs require no new ALTER. Canonical unknown/drifted ledger rejection is retained. Stored modes other than caller_trust, or nonnull executor identity, cannot run as caller grants.
+
+Before rollout back up DB/key/config and prior immutable images; quiesce lifecycle admission, reconcile uncertain resources and drain/stop old workers. Do not mix old member-only workers with new manager/admin Trust jobs. Kolla creates a missing empty policy map without replacing operator rules and mounts it read-only for API/worker. Audit restrictive legacy operator policy rather than adding roles. Preserve Sentinel settings, callbacks, per-VM bearer/private key and existing agents; no VM-agent/image/dataplane migration is implied. Native provider policy must independently permit the delegated actual core role.
+
+Final current-source local qualification is recorded separately by the integrating owner; historical0.3.5/0.3.4 results below are not candidate0.3.6 acceptance or deployment evidence.
+
 # Waygate 0.3.5 — acknowledged status and Sentinel primary routing
 
 The status-fix source follows deployed0.3.4. Runtime/distribution/lock are0.3.5; the unique Git/image ref is **`v0.3.5-statusfix.20261014` / `0.3.5-statusfix.20261014`**. This prerelease artifact name avoids metadata-action's stable-tag automatic `latest` overwrite. Existing releases/images/tags, SDK0.2.0, dependencies, migrations001–006 and gateway agents remain unchanged. Publication and production completion require separate immutable receipts; preparation is not deployment proof.

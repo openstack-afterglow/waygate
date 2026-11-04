@@ -5,20 +5,25 @@ Separate Waygate project inventory, assigned-profile use, editing and destructiv
 
 ## Requirements
 
-### Requirement: Explicit tenant capabilities
-Native endpoints SHALL authorize exact Waygate action leaves using current uncached Keystone global role definitions, implication DAG and effective project assignments. Runtime SHALL NOT restore missing edges from a static parent bundle or issuance-time token roles. Unknown/malformed/domain/ambiguous/dangerous graph resolution and provider lookup failure SHALL fail closed. Plain project roles SHALL NOT imply service entitlement; all resources SHALL remain token-project-bound.
+### Requirement: Standard project authority
+Native endpoints SHALL authorize current effective project `member`, `manager` or `admin` for owned resource management and `reader` for nonsecret inventory, without dedicated Waygate roles. Fresh complete global Keystone role definitions, the role-ID implication DAG and effective project assignments remain authoritative, including custom/group/domain-inherited implications; no local aliases or legacy-root filters substitute for native authority. Unknown, malformed, domain-specific or ambiguous effective authority and incomplete directory data SHALL fail closed.
 
-Nonreader use/write capabilities SHALL also require effective native member. Inventory SHALL require native reader or member. Unverified raw admin/manager SHALL fail closed; caller-supplied role headers SHALL NOT authorize. Exact leaf-only grants SHALL remain narrow.
+Per-operation oslo.policy rules SHALL apply after mandatory project/core-role/credential ceilings. Operator overrides may narrow authority but SHALL NOT upgrade reader, retired-service-only, restricted global-admin or foreign-project credentials. Authenticated `/v1/policy/capabilities` SHALL use the same rules and return `Cache-Control: no-store`.
 
-#### Scenario: Grade restriction
-- **WHEN** a plain member or project administrator invokes service APIs
-- **THEN** inventory and privileged operations are denied without explicit service roles.
-- **WHEN** an editor deletes, rotates credentials, changes routing or imports/exports credentials
-- **THEN** authorization is denied.
+#### Scenario: Plain standard roles
+- **WHEN** an enabled current project member, manager or admin invokes owned metadata or client management
+- **THEN** management succeeds without Waygate role assignments or implied member requirements.
+- **WHEN** a reader requests inventory
+- **THEN** only nonsecret inventory is returned; config/download/write remain denied.
 
-#### Scenario: Removed implication invalidates old token authority
-- **WHEN** an old token names waygate_admin but the current DAG no longer reaches the needed action leaf
-- **THEN** that action is denied; a static bundle must not restore it.
+#### Scenario: Native provider delegation
+- **WHEN** an unrestricted caller creates a provider operation
+- **THEN** a two-hour operation Trust delegates exactly one actually effective canonical core role, preferring member, then manager, then admin.
+- **AND** persisted role ID, token role-ID/name ceiling, current actor/project/domain/action, Trust and job ownership are rechecked; no missing member is manufactured.
+
+#### Scenario: Original credential attenuation
+- **WHEN** an original restricted credential has reader while current user membership has member
+- **THEN** discovery/inventory remain reader-only and provider execution, private downloads and global administration are denied.
 
 ### Requirement: Assigned profile access
 Connect users SHALL download only their own assigned client profile. Nullable persisted owner_user_id SHALL be upgraded additively; assignment SHALL validate current enabled project membership. Unknown-owner legacy and imported clients SHALL fail closed for ordinary users. Metadata SHALL contain no private key, PSK, token or profile text.
@@ -27,10 +32,10 @@ Connect users SHALL download only their own assigned client profile. Nullable pe
 - **WHEN** a connect user requests another user's or an unassigned profile
 - **THEN** the request is denied before decrypting credentials.
 
-#### Scenario: Editor-only creation does not grant connection credentials
-- **WHEN** clients-editor permits metadata creation but current connect-user authority is absent or its implication was removed
-- **THEN** the create response has tunnel_conf null, even for the caller's own new profile.
-- **WHEN** current connect-user authority exists, the persisted owner is the caller and the client is enabled
+#### Scenario: Creation does not bypass private ownership
+- **WHEN** management permits client creation but the profile belongs to another user or is unassigned
+- **THEN** the create response has tunnel_conf null.
+- **WHEN** current management authority exists, the persisted owner is the caller and the client is enabled
 - **THEN** the create response may include the private profile under no-store.
 
 ### Requirement: Owner-scoped credential export

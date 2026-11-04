@@ -9,6 +9,19 @@ Waygate는 OpenStack 프로젝트별 WireGuard 게이트웨이 VM을 만들고, 
 - package versions: root distribution/runtime and root `uv.lock` are `0.3.5`; independent SDK remains `0.2.0`. The scoped status-fix artifact uses unique prerelease image/tag `0.3.5-statusfix.20261014` so canonical metadata publication does not overwrite an existing stable image or `latest`. Kolla selects that artifact by default; production must pin its qualified immutable digest. The preceding 0.3.4 production source is `1c752692f053b78df963805583c930a7a801241b`. The separate source-build default remains `1c59b5e86d3c3c1b9d3397b38301ee9bc401cf03`, requiring explicit operator selection. Python `>=3.11` (CI/runtime 3.12), FastAPI `0.136.3`, Starlette `1.3.1`, Uvicorn `0.39.0`, OpenStack SDK `3.3.0`, python-keystoneclient `5.4.0`, Pydantic `2.13.4`, redis client `5.0.0` and dependency selections are retained. Existing gateway agents/images are not upgraded.
 - 1분 책임 요약: `waygate-api`는 Keystone 인증·project 소유권·API를, `waygate-worker`는 durable provision/delete job을, MariaDB는 정본 레코드와 암호화 자격증명을, Redis는 관측 상태의 보조 캐시를 소유한다. agent 인증은 매번 DB 정본을 확인하며 Redis token cache를 사용하지 않는다. 실제 WireGuard private key와 NAT 적용은 게이트웨이 VM의 agent가 소유한다.
 
+### Candidate 0.3.6 authority boundary — 2026-11-04
+
+This isolated candidate starts at published `v0.3.5` / `1886a8ed7e7af4ac812a8579901fe18f31c8b034`, not the concurrent stale/dirty primary checkout. Root distribution/runtime/lock and Kolla registry default are 0.3.6; SDK0.2.0 and immutable source-build pin remain independent. It includes the exact already-applied `007_admin_execution` migration (SHA-256 `2dd4d14afa2a5a50aa853d0e4101dc044f5d7858bc57889245d0ebbe1a9f47fb`) for ledger compatibility; no new dedicated-executor behavior is enabled (caller_trust only, unsupported stored modes fail closed).
+
+`waygate/auth.py` validates the original credential without token exchange, checks enabled exact actor/project/domains, intersects restricted issuance roles with current native roles, and resolves complete effective project assignments through the current global role-ID DAG. Custom/group/domain-derived native implications remain effective without legacy-root pruning. Global admin uses separately verified raw user/group system grants; credential attenuation forbids machine/global/foreign-target escalation.
+
+`waygate/policy.py` registers twenty native per-operation oslo.policy rules. Member/manager/admin authorize owned management; reader authorizes four nonsecret inventory actions only. Mandatory floors precede operator YAML; per-action deny/reload and safe failure behavior are shared by routes and `waygate/api/policy.py` authenticated no-store capability discovery. Clients retain assign-once ownership, no foreign private config or key decryption bypass; bundle export remains owner-scoped; machine callbacks retain durable server bearer authority.
+
+`services/execution.py` retains operation-owned two-hour impersonating Trusts and006 persisted capability/role-ID identity, selecting an actually effective native core role in least-authority order member→manager→admin. Manager/admin alone do not require implied member and cannot mint it. Every send rechecks exact delegated role, enabled actor/project/domains, action, Trust and SQL job lease; token roles cannot exceed the chosen core ceiling. Old member-only grants remain valid under unchanged006 schema. Native Keystone provider policy must independently permit the delegated role; Waygate does not widen provider policy or assign roles.
+
+Kolla initializes a missing empty policy map without overwriting operator rules, mounts it read-only in API/worker and renders `[oslo_policy]`; images ship a non-active sample. Existing0.3.5 Sentinel/status cache implementation and agent/credential behavior are retained. Before upgrade audit the immutable 001–007 ledger, back up protected config/DB/images, quiesce lifecycle admission, drain/stop old workers and install the exact published wheel/role before tagged rollout. Never run old member-only workers on new manager/admin grants. No mixed-worker, live cloud/VPN, image publication or operational success is inferred from source preparation.
+
+
 ## Development status
 
 상태와 검증 수준은 서로 다른 축이다. **0.3.4는 2026-10-14 local/disposable qualification을 통과했고, 별도로 exact-SHA CI·tag image publication·production rollout이 완료되었다.** Local receipts: frozen Python 3.12 service/dev sync 후 `uv run pytest tests -q -n 4 --dist worksteal` **729 passed / 3 skipped**, independent SDK **44 passed**, root/SDK Ruff passed, privileged disposable MariaDB 11.4 delegation **61 passed**, canonical API/worker linux/arm64 + linux/amd64 builds와 native container smoke **2 passed** (`aarch64`/`x86_64`, MariaDB 11.4.13). Local 결과 자체는 CI·publication·live cloud·production 증거가 아니다. [Local qualification](RELEASE_NOTES.md#local-qualification--2026-10-14)과 [별도 production receipt](RELEASE_NOTES.md#production-rollout-receipt--2026-10-14)를 구분한다: source `1c752692f053b78df963805583c930a7a801241b`, tag `0.3.4` Docker success, gate **20 completed / 1 failed**, six writers exit 0, cold restore **7 tables / 54 rows**, no migration (**6/6**), genconfig unchanged, all six pinned replicas healthy with **0 restarts**, `/v1/health` **200 ×3 + public**. Live lifecycle/data-plane qualification remains separate. Source review는 이 문서의 Maintenance marker에 canonical stamp로 기록한다.
@@ -454,9 +467,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "1983620a517982b3c8521e6c9c4807b3a695557d1184d6d8fefb4c27b9c60a88",
-  "reviewed_at": "2026-10-14T13:03:35Z",
-  "summary": "0.3.5 status patch: reviewed cache native Sentinel primary and pool lifecycle, TOML/environment settings, acknowledged SETEX error-to-503 and safe logs, unchanged DB agent authority and schema, complete Kolla inventory/monitor, runtime/lock/artifact metadata, failure/rediscovery/config/render regressions, and API-only tagged/skipped rollout/rollback contracts; no worker/provider/SDK/LB/Valkey service change."
+  "source_sha256": "e2a8f75307e551f0045b69b3c54cbcbba7ac50445f2fb2fd477657409bcfd2cf",
+  "reviewed_at": "2026-11-04T03:55:40Z",
+  "summary": "Fix 001-007 docs (README gateway + authority, ARCH candidate boundary + Kolla ledger); add upgrade config-order, policy ro-mount/init, 007 checksum regressions"
 }
 ```
 <!-- architecture-review:end -->

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.6 — candidate prepared 2026-11-04 UTC (not published/deployed)
+
+### 한국어
+- **버전/일자:** 0.3.6, 준비 2026-11-04 UTC. 발행/운영 배포 일시: 아직 없음.
+- **변경/수정:** 전용 Waygate 역할 없이 현재 project member/manager/admin의 소유 자원 관리와 reader의 비밀 없는 조회를 허용한다. 원본 credential 교환 없는 인증, native effective role-ID DAG, 제한 credential 교집합, per-action oslo.policy 및 `/v1/policy/capabilities`를 제공한다. Provider Trust는 실제 보유한 core role을 member→manager→admin 순으로 선택하므로 manager 단독도 실제 provider 작업이 가능하다. 개인 VPN key/owner, global system admin, agent bearer와 SQL lease/replay 경계 및0.3.5 Sentinel 수정을 유지한다.
+- **폐기/제거:** 전용 `waygate_*`/`waygate-*` role 필수 조건과 project admin/manager 일괄 거절 제거. 기존 Keystone role/assignment는 삭제하지 않으며 native core implication을 존중한다. 그 외 없음.
+- **이행:** 운영에 이미 적용된007을 원문/checksum 그대로 포함한다. 001–006만 있는 환경에는007 선적용이 필요하고 기존007 ledger는 변경하지 않는다. 전용 executor는 활성화하지 않으며 caller_trust 외 저장 row는 fail-closed다. DB/config/image 백업 및 old worker drain/정지 후 새 cohort를 시작한다. SDK0.2.0은 별도다.
+
+### English
+- **Version/date:** 0.3.6, prepared 2026-11-04 UTC. Publication/deployment dates: None yet.
+- **Changes/fixes:** Admit current project member/manager/admin management and reader nonsecret inventory without service roles. Preserve original restricted credentials and native effective role-ID implications; add per-action oslo.policy and authenticated capability discovery. Delegate only an actually held core role, preferring member→manager→admin, so manager alone can perform provider lifecycle. Retain private profiles, independent global/agent authority, SQL lease/replay boundaries and0.3.5 Sentinel fixes.
+- **Deprecated/removed:** Dedicated Waygate-role prerequisites and blanket project admin/manager rejection. Existing Keystone assignments are not deleted; native implications remain authoritative. Other: None.
+- **Upgrade:** Include the exact already-deployed007 migration/checksum; apply it before new processes only on older001–006 schemas. Never erase/rewrite the existing ledger. Dedicated executor is not enabled; unsupported stored modes fail closed. Back up config/DB/images, drain/stop old workers and do not let old member-only workers consume new manager/admin grants. SDK remains0.2.0.
+
 ## 0.3.5 — 2026-10-14 (scoped status-fix artifact)
 
 - Acknowledge status204 only after successful TTL300 storage; safe503 on read-only/connection/timeout/backend failure. Fixed-category logs omit raw exception/traceback, DSN, credentials, bearer and payload; DB token authority remains unchanged.
