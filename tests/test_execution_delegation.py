@@ -50,8 +50,8 @@ SERVICE_USER = "waygate-svc"
 SERVICE_PROJECT = "waygate-service"
 PASSWORD = "synthetic-service-secret"
 FLAVOR, IMAGE, NETWORK = "flavor-zero", "image-ubuntu", "network-provider"
-EDITOR = {"member", "waygate-inventory_reader", "waygate-gateways_editor"}
-ADMIN = {"member", "waygate-inventory_reader", "waygate-gateways_admin"}
+EDITOR = {"member"}
+ADMIN = {"member"}
 ROLE_NAMES = (
     "admin",
     "member",
@@ -331,6 +331,11 @@ def _handler(cloud: SyntheticCloud):
                 if token is None:
                     return status, {"error": {"code": status, "message": "synthetic authentication refused"}}
                 return 201, (cloud.token_body(token), token)
+            if path == "/v3/auth/tokens" and method == "GET":
+                subject = self.headers.get("X-Subject-Token")
+                if subject not in cloud.tokens:
+                    return 404, {"error": {"code": 404, "message": "unknown synthetic token"}}
+                return 200, (cloud.token_body(subject), subject)
             caller = self.caller()
             if caller is None:
                 return 401, {"error": {"code": 401, "message": "synthetic token required"}}
@@ -392,6 +397,10 @@ def _handler(cloud: SyntheticCloud):
                 return 403, {"error": {"code": 403, "message": "Only admin or trustor can manage this trust"}}
             if caller["user"] != SERVICE_USER or caller["trust"] is not None:
                 return 403, {"error": {"code": 403, "message": "directory reads require the service identity"}}
+            if path.startswith("/v3/users/") and path.endswith("/groups"):
+                return 200, {"groups": [], "links": {"next": None}}
+            if path == "/v3/domains/default":
+                return 200, {"domain": {"id": "default", "enabled": True}}
             if path == "/v3/roles":
                 names = [name for name in ROLE_NAMES if not query.get("name") or query["name"][0] == name]
                 return 200, {"roles": [_role(name) for name in names], "links": {"next": None}}
@@ -721,7 +730,7 @@ def _assert_assignment_queries(cloud, start=0):
     assert len(system) + len(project) == len(queries)
     for query in system:
         assert query == {
-            "user.id": query["user.id"], "role.id": ["role-admin"], "scope.system": ["all"],
+            "user.id": query["user.id"], "scope.system": ["all"],
         }
         assert query["user.id"] in (["user-a"], ["user-b"])
     for query in project:
@@ -787,7 +796,7 @@ async def test_direct_system_admin_owner_patch_survives_installed_sdk_effective_
     assert downloaded.headers["cache-control"] == "no-store"
     _assert_assignment_queries(cloud, start)
     assert all(query["user.id"] == ["user-a"] for query in cloud.role_assignment_queries[start:])
-    assert sum("scope.system" in query for query in cloud.role_assignment_queries[start:]) >= 3
+    assert sum("scope.system" in query for query in cloud.role_assignment_queries[start:]) >= 2
 
     # A system administrator is still not allowed to transfer or clear a known
     # owner, or download someone else's private profile.
@@ -807,7 +816,7 @@ async def test_direct_system_admin_owner_patch_survives_installed_sdk_effective_
     "wrong-role", "wrong-subject", "project-scope", "domain-scope", "false-system",
     "nonboolean-system", "group-system", "missing", "outage",
 ])
-async def test_direct_system_admin_owner_patch_rejects_nonmatching_rows_and_outage(native, failure):
+async def test_project_admin_owner_assignment_does_not_require_a_system_grant(native, failure):
     cloud = native.cloud
     cloud.assignments["user-a", "project-a"] = {"admin"}
     cloud.assignments["user-b", "project-a"] = {"member", "waygate-clients_editor"}
@@ -832,21 +841,19 @@ async def test_direct_system_admin_owner_patch_rejects_nonmatching_rows_and_outa
     await _seed_unassigned_profile()
     path = "/v1/servers/owner-server/clients/unassigned"
 
-    # The editor caller is independently authorized; denial must come from
-    # validation of the proposed platform-role owner's current direct grant.
+    # A current native project admin can own a profile without system authority.
+    # The proposed owner's system-grant shape does not replace project membership.
     response = await native.client.patch(
         path, json={"owner_user_id": "user-a"}, headers=native.headers("user-b"),
     )
-    assert response.status_code == 422, response.text
+    expected = 503 if failure == "outage" else 200
+    assert response.status_code == expected, response.text
     [stored] = await _rows(WaygateClient, id="unassigned")
-    assert stored.owner_user_id is None
+    assert stored.owner_user_id == (None if failure == "outage" else "user-a")
     assert stored.name == "legacy" and stored.enabled is True
-    _assert_assignment_queries(cloud)
-    assert {
-        "user.id": ["user-a"], "role.id": ["role-admin"], "scope.system": ["all"],
-    } in cloud.role_assignment_queries
+    cloud.fail_system_assignments = False
     denied = await native.client.get(path + "/config", headers=native.headers("user-a"))
-    assert denied.status_code == 403, denied.text
+    assert denied.status_code == (403 if failure == "outage" else 200), denied.text
     assert cloud.cloud_requests == [] and cloud.trusts == {}
     assert await _rows(WaygateExecutionGrant) == [] and await _rows(WaygateJob) == []
 
@@ -877,7 +884,7 @@ async def test_direct_system_admin_execution_still_delegates_only_member(native)
     _assert_assignment_queries(cloud)
 
 
-async def test_direct_system_admin_without_project_member_cannot_own_or_delegate(native):
+async def test_verified_system_admin_without_project_management_can_own_but_not_delegate(native):
     cloud = native.cloud
     cloud.assignments["user-a", "project-a"] = {"reader"}
     cloud.assignments["user-b", "project-a"] = {"member", "waygate-clients_editor"}
@@ -888,8 +895,8 @@ async def test_direct_system_admin_without_project_member_cannot_own_or_delegate
         "/v1/servers/owner-server/clients/unassigned", json={"owner_user_id": "user-a"},
         headers=native.headers("user-b"),
     )
-    assert assigned.status_code == 422, assigned.text
-    assert (await _rows(WaygateClient, id="unassigned"))[0].owner_user_id is None
+    assert assigned.status_code == 200, assigned.text
+    assert (await _rows(WaygateClient, id="unassigned"))[0].owner_user_id == "user-a"
     admitted = await native.client.post("/v1/servers", json={"name": "denied"}, headers=native.headers("user-a"))
     assert admitted.status_code == 403, admitted.text
     assert [row.id for row in await _rows(WaygateServer)] == ["owner-server"]
@@ -965,7 +972,7 @@ async def test_revoked_authority_stops_worker_before_any_cloud_mutation(native, 
     server_id = await _create(native)
     [trust] = cloud.trusts.values()
     if revocation == "capability":
-        cloud.assignments["user-a", "project-a"].discard("waygate-gateways_editor")
+        cloud.assignments["user-a", "project-a"] = {"reader"}
     elif revocation == "member":
         cloud.assignments["user-a", "project-a"].discard("member")
     elif revocation == "user":
@@ -993,7 +1000,7 @@ async def test_authority_removed_mid_provision_denies_the_next_cloud_request(nat
 
     def revoke_after_port(method, path):
         if (method, path) == ("POST", "/network/v2.0/ports"):
-            cloud.assignments["user-a", "project-a"].discard("waygate-gateways_editor")
+            cloud.assignments["user-a", "project-a"] = {"reader"}
 
     cloud.after_cloud_request = revoke_after_port
     assert await waygate_jobs.process_one_job() is True
@@ -1628,3 +1635,42 @@ async def test_native_stale_retry_attempt_cannot_write_server_status_after_takeo
     assert (server.status, server.status_reason, server.deleted_at) == ("ERROR", "previous attempt failed", None)
     assert (await _rows(WaygateExecutionGrant, id=job.execution_grant_id))[0].status == "active"
     assert not any(method in {"POST", "DELETE"} for method, _path, _caller in native.cloud.cloud_requests)
+
+
+@pytest.mark.parametrize("role", ["member", "manager", "admin"])
+async def test_plain_core_role_delegates_exact_owned_role_without_service_or_implied_member(native, role):
+    cloud = native.cloud
+    cloud.assignments["user-a", "project-a"] = {role}
+    saved = dict(IMPLIES)
+    IMPLIES.clear()
+    try:
+        server_id = await _create(native)
+        [trust] = cloud.trusts.values()
+        assert trust["roles"] == [role]
+        [grant] = await _rows(WaygateExecutionGrant)
+        assert grant.role_id == "role-" + role
+        assert await waygate_jobs.process_one_job() is True
+        assert (await _rows(WaygateJob, server_id=server_id))[0].status == "completed"
+        assert all(record["roles"] == {role} for _, _, record in cloud.cloud_requests)
+        assert (SERVICE_USER, "project-a") not in cloud.assignments
+    finally:
+        IMPLIES.clear()
+        IMPLIES.update(saved)
+
+
+@pytest.mark.parametrize("role", ["member", "manager", "admin"])
+async def test_exact_delegated_core_role_revocation_never_substitutes_another_role(native, role):
+    cloud = native.cloud
+    cloud.assignments["user-a", "project-a"] = {role}
+    saved = dict(IMPLIES)
+    IMPLIES.clear()
+    try:
+        await _create(native)
+        cloud.assignments["user-a", "project-a"] = {"reader"}
+        before = len(cloud.cloud_requests)
+        assert await waygate_jobs.process_one_job() is True
+        assert cloud.cloud_requests[before:] == []
+        assert (await _rows(WaygateJob))[0].status == "failed"
+    finally:
+        IMPLIES.clear()
+        IMPLIES.update(saved)

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +45,7 @@ def _load_toml() -> dict:
     database = data.get("database", {})
     cache = data.get("cache", {})
     waygate = data.get("waygate", {})
+    oslo_policy = data.get("oslo_policy", {})
     return {
         "os_auth_url": keystone.get("auth_url", ""),
         "os_username": keystone.get("username", ""),
@@ -71,6 +73,8 @@ def _load_toml() -> dict:
         "waygate_default_listen_port": waygate.get("default_listen_port", 51820),
         "waygate_encryption_key": waygate.get("encryption_key", ""),
         "trusted_proxies": waygate.get("trusted_proxies", "127.0.0.1/32,::1/128"),
+        "oslo_policy_file": oslo_policy.get("policy_file", "/etc/waygate/policy.yaml"),
+        "oslo_policy_dirs": oslo_policy.get("policy_dirs", []),
     }
 
 
@@ -106,6 +110,8 @@ class Settings(BaseSettings):
     waygate_default_listen_port: int = 51820
     waygate_encryption_key: str = ""
     trusted_proxies: str = "127.0.0.1/32,::1/128"
+    oslo_policy_file: str = "/etc/waygate/policy.yaml"
+    oslo_policy_dirs: list[str] = Field(default_factory=list)
 
     @field_validator("waygate_agent_install_mode")
     @classmethod
@@ -168,5 +174,5 @@ def require_public_callback_base_url(settings: Settings) -> str:
 def get_settings() -> Settings:
     for key, value in _load_toml().items():
         if not os.environ.get(key.upper()):
-            os.environ[key.upper()] = str(value)
+            os.environ[key.upper()] = json.dumps(value) if isinstance(value, list) else str(value)
     return Settings()

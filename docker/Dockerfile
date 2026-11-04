@@ -23,6 +23,7 @@ WORKDIR /app
 COPY --from=waygate-builder /app/.venv /app/.venv
 COPY pyproject.toml uv.lock LICENSE ./
 COPY waygate/ ./waygate/
+RUN install -d -m 0755 /etc/waygate && cp waygate/policy.yaml.sample /etc/waygate/policy.yaml.sample
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \

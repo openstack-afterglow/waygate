@@ -6,15 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from waygate.auth import (
-    has_capability,
-    require_clients_admin,
-    require_clients_editor,
-    require_clients_update,
-    require_connect,
-    require_inventory,
-    validate_client_owner,
-)
+from waygate import policy
+from waygate.auth import require_action, require_clients_update, validate_client_owner
 from waygate.db import is_db_available
 from waygate.models.schemas import (
     WaygateClientCreateRequest,
@@ -85,7 +78,7 @@ async def create_waygate_client(
     server_id: str,
     body: WaygateClientCreateRequest,
     response: Response,
-    token_info: dict = Depends(require_clients_editor),
+    token_info: dict = Depends(require_action("waygate:client:create")),
 ):
     """Issue metadata; plaintext tunnel_conf requires current connect authority on an enabled owned profile.
 
@@ -150,7 +143,7 @@ async def create_waygate_client(
         raise HTTPException(status_code=404, detail="Waygate 클라이언트를 찾을 수 없습니다")
     tunnel_conf = None
     if (
-        has_capability(token_info, "waygate-connect_user")
+        policy.allows(token_info, "waygate:client:download")
         and client.get("owner_user_id") == token_info["user_id"]
         and client.get("enabled")
     ):
@@ -175,7 +168,7 @@ async def create_waygate_client(
 
 
 @router.get("/{server_id}/clients", response_model=list[WaygateClientInfo])
-async def list_waygate_clients(server_id: str, token_info: dict = Depends(require_inventory)):
+async def list_waygate_clients(server_id: str, token_info: dict = Depends(require_action("waygate:client:list"))):
     _require_db()
     project_id = token_info["project_id"]
     await _get_owned_server(project_id, server_id)
@@ -193,12 +186,12 @@ async def update_waygate_client(
 ):
     _require_db()
     project_id = token_info["project_id"]
-    # Any enabled transition is revocation/reactivation of credential access and requires clients admin.
+    # Operator overrides can still distinguish editing from enabled transitions.
     editing_fields = body.model_fields_set - {"enabled"}
-    if editing_fields and not has_capability(token_info, "waygate-clients_editor"):
-        raise HTTPException(status_code=403, detail="Client editing requires Waygate clients editor")
-    if "enabled" in body.model_fields_set and not has_capability(token_info, "waygate-clients_admin"):
-        raise HTTPException(status_code=403, detail="Client enable/revoke requires Waygate clients admin")
+    if editing_fields and not policy.allows(token_info, "waygate:client:update"):
+        raise HTTPException(status_code=403, detail="Waygate client editing is not authorized")
+    if "enabled" in body.model_fields_set and not policy.allows(token_info, "waygate:client:set-enabled"):
+        raise HTTPException(status_code=403, detail="Waygate client enable/revoke is not authorized")
     await _get_owned_server(project_id, server_id)
     if "owner_user_id" in body.model_fields_set:
         if body.owner_user_id is None:
@@ -216,7 +209,7 @@ async def update_waygate_client(
 
 
 @router.delete("/{server_id}/clients/{client_id}", status_code=204)
-async def delete_waygate_client(server_id: str, client_id: str, token_info: dict = Depends(require_clients_admin)):
+async def delete_waygate_client(server_id: str, client_id: str, token_info: dict = Depends(require_action("waygate:client:delete"))):
     _require_db()
     project_id = token_info["project_id"]
     await _get_owned_server(project_id, server_id)
@@ -226,7 +219,7 @@ async def delete_waygate_client(server_id: str, client_id: str, token_info: dict
 
 
 @router.get("/{server_id}/clients/{client_id}/config")
-async def download_vpn_client_config(server_id: str, client_id: str, token_info: dict = Depends(require_connect)):
+async def download_vpn_client_config(server_id: str, client_id: str, token_info: dict = Depends(require_action("waygate:client:download"))):
     """`.conf` 파일 다운로드. 매 호출마다 복호화 후 재렌더 (k3s kubeconfig 다운로드 패턴 미러)."""
     _require_db()
     project_id = token_info["project_id"]

@@ -1,0 +1,26 @@
+# Registered Waygate defaults; copy selected rules to policy.yaml to override.
+# Capability labels are internal UI projections, not assignable Keystone roles.
+# Reader sees nonsecret inventory; member/manager/admin manage project resources.
+# VPN configs are member actions and additionally require the assigned enabled owner.
+# Native ownership, original credential ceilings and provider member-only Trusts
+# remain mandatory even under permissive operator expressions.
+"waygate:server:list": "system_admin:True or role:reader or role:member or role:manager or role:admin"
+"waygate:server:get": "system_admin:True or role:reader or role:member or role:manager or role:admin"
+"waygate:server:create": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:server:update": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:server:delete": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:server:rotate-agent-token": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:client:list": "system_admin:True or role:reader or role:member or role:manager or role:admin"
+"waygate:client:create": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:client:update": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:client:set-enabled": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:client:delete": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:client:download": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:network:list": "system_admin:True or role:reader or role:member or role:manager or role:admin"
+"waygate:network:attach": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:network:detach": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:bundle:export": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:bundle:import": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:resource-policy:list": "system_admin:True"
+"waygate:resource-policy:catalog": "system_admin:True"
+"waygate:resource-policy:update": "system_admin:True"

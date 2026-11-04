@@ -16,7 +16,7 @@ from keystoneauth1.identity import v3
 from keystoneclient.v3 import client as ks_client
 from sqlalchemy import exists, or_, select
 
-from waygate import auth
+from waygate import auth, policy
 from waygate.config import get_settings
 from waygate.db import get_session_factory
 from waygate.models.orm import WaygateExecutionGrant, WaygateJob
@@ -29,6 +29,12 @@ _CAPABILITIES = {
     "delete": "waygate-gateways_admin",
     "attach": "waygate-routing_admin",
     "detach": "waygate-routing_admin",
+}
+_ACTIONS = {
+    "provision": "waygate:server:create",
+    "delete": "waygate:server:delete",
+    "attach": "waygate:network:attach",
+    "detach": "waygate:network:detach",
 }
 
 
@@ -121,6 +127,8 @@ def _current_authority(client, grant: ExecutionGrant) -> str:
     if project.id != grant.project_id or getattr(project, "enabled", None) is not True:
         raise ExecutionDenied("Waygate execution project is not enabled")
     try:
+        auth._require_enabled_identity_domain(client, user)
+        auth._require_enabled_identity_domain(client, project)
         info = {
             "user_id": grant.user_id,
             "project_id": grant.project_id,
@@ -131,16 +139,21 @@ def _current_authority(client, grant: ExecutionGrant) -> str:
         raise ExecutionDenied("Waygate execution role graph was rejected") from None
     except Exception as exc:
         raise ExecutionUnavailable("Waygate execution role graph is unavailable") from exc
-    if "member" not in info["roles"] or not auth.has_capability(info, grant.capability):
-        raise ExecutionDenied("Current Waygate execution capability is required")
-    roles = [
-        role
-        for role in client.roles.list(name="member")
-        if role.name == "member" and not getattr(role, "domain_id", None)
-    ]
-    if len(roles) != 1 or (grant.role_id is not None and roles[0].id != grant.role_id):
-        raise ExecutionDenied("Waygate execution role is ambiguous or changed")
-    return roles[0].id
+    if not policy.allows(info, _ACTIONS[grant.purpose]):
+        raise ExecutionDenied("Current native project management and Waygate action are required")
+    rows, _names = auth._role_catalog(client)
+    candidates = {
+        role["name"]: role_id for role_id, role in rows.items()
+        if role["name"] in {"member", "manager", "admin"} and role["name"] in info["roles"]
+    }
+    if grant.role_id is not None:
+        if grant.role_id not in candidates.values():
+            raise ExecutionDenied("The delegated native project role was revoked or changed")
+        return grant.role_id
+    for name in ("member", "manager", "admin"):
+        if name in candidates:
+            return candidates[name]
+    raise ExecutionDenied("An effective native project management role is required")
 
 
 def _validate_trust(trust, grant: ExecutionGrant) -> None:
@@ -161,6 +174,17 @@ def _validate_trust(trust, grant: ExecutionGrant) -> None:
 
 
 def _validate_access(access, grant: ExecutionGrant) -> None:
+    directory = auth._get_admin_ks_client()
+    try:
+        rows, _names = auth._role_catalog(directory)
+    finally:
+        _close_session(directory.session)
+    delegated = rows.get(grant.role_id, {}).get("name")
+    core = ("member", "manager", "admin")
+    if delegated not in core:
+        raise ExecutionDenied("Delegated native role is no longer a management role")
+    allowed_names = {"reader", *core[:core.index(delegated) + 1]}
+    allowed_ids = {role_id for role_id, role in rows.items() if role["name"] in allowed_names}
     if (
         access.trust_id != grant.trust_id
         or access.trustor_user_id != grant.user_id
@@ -168,7 +192,8 @@ def _validate_access(access, grant: ExecutionGrant) -> None:
         or access.user_id != grant.user_id
         or access.project_id != grant.project_id
         or grant.role_id not in access.role_ids
-        or not set(access.role_names) <= {"member", "reader"}
+        or not set(access.role_names) <= allowed_names
+        or not set(access.role_ids) <= allowed_ids
         or not access.expires
         or _utc(access.expires) > grant.expires_at
         or _utc(access.expires) <= datetime.now(UTC)
@@ -304,6 +329,8 @@ async def create_grant(token_info: dict, server_id: str, purpose: str) -> Execut
         raise ValueError("Unsupported Waygate execution purpose")
     if not all(token_info.get(key) for key in ("project_id", "user_id", "token")):
         raise ExecutionDenied("An authenticated project-scoped actor is required")
+    if token_info.get("credential_restricted"):
+        raise ExecutionDenied("An unrestricted original user credential is required for delegation")
     grant = ExecutionGrant(
         id=str(uuid.uuid4()),
         project_id=token_info["project_id"],
@@ -367,6 +394,8 @@ async def load_grant(
         if (
             row is None
             or row.status != "active"
+            or row.execution_mode != "caller_trust"
+            or row.executor_user_id is not None
             or (row.project_id, row.server_id, row.user_id, row.purpose) != (project_id, server_id, user_id, purpose)
             or row.capability != _CAPABILITIES.get(purpose)
             or not all((row.trust_id, row.trustee_user_id, row.role_id))

@@ -1018,6 +1018,19 @@ wheels = [
 ]
 
 [[package]]
+name = "oslo-context"
+version = "6.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pbr" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/6b/71f00290f6fb7302178422d3478093aacf972ab3e6e0f4b9a91026f533f8/oslo_context-6.5.0.tar.gz", hash = "sha256:7e1fb03c6a97167959f37d930300154e0ee837ecdb85798c2bbe8878b56caaaf", size = 35642, upload-time = "2026-07-10T13:48:26.139Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/ab/be9bc57dbc54f07083a025736f6ba835ce2d89278200dbc9293010cade63/oslo_context-6.5.0-py3-none-any.whl", hash = "sha256:6f3f038917711c03fa34bae1867076df24bd7a5ab5d3bf0bd0407869c5274d7e", size = 20097, upload-time = "2026-07-10T13:48:25.238Z" },
+]
+
+[[package]]
 name = "oslo-i18n"
 version = "6.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1027,6 +1040,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5e/69/72b03bb4d33f51a157c02d5297227bae48b9c359103856942b8774b608df/oslo_i18n-6.9.0.tar.gz", hash = "sha256:574bcf21873b185068bcec951de1ec093158ffdff05a8055fd18ddcb69f69e65", size = 50369, upload-time = "2026-07-10T13:44:34.301Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/3a/f9f9be0fd3b5c180b64f08daef70ca20fbbdccab47d0a21b65f0e4b5b8d1/oslo_i18n-6.9.0-py3-none-any.whl", hash = "sha256:354b6cd3ba1acf1f04231f690028fd5b58bd8b7cda7bd9859126bb97152c717b", size = 47847, upload-time = "2026-07-10T13:44:33.205Z" },
+]
+
+[[package]]
+name = "oslo-policy"
+version = "6.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "oslo-config" },
+    { name = "oslo-context" },
+    { name = "oslo-i18n" },
+    { name = "oslo-serialization" },
+    { name = "oslo-utils" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "stevedore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/1e/71f9edfe473164f185adc3f9c9795678fb74dbf4dd0036468ef3b9b3d2e1/oslo_policy-6.0.1.tar.gz", hash = "sha256:0983259d3919b15caa3755b22fba1451904f60ac20a48656bc61afaf420f7a67", size = 121527, upload-time = "2026-08-24T14:03:35.7Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/d9/a8f1ccf1b706ade6cf3d7fa229651a023efa6d1b62b950954134f91e8076/oslo_policy-6.0.1-py3-none-any.whl", hash = "sha256:9509b6c824b3da378e5f11014c05c188791508ad92acb68feb05272b09dd2056", size = 89020, upload-time = "2026-08-24T14:03:34.583Z" },
 ]
 
 [[package]]
@@ -1800,7 +1832,7 @@ wheels = [
 
 [[package]]
 name = "waygate"
-version = "0.3.5"
+version = "0.3.6"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1820,6 +1852,8 @@ service = [
     { name = "jinja2" },
     { name = "keystoneauth1" },
     { name = "openstacksdk" },
+    { name = "oslo-config" },
+    { name = "oslo-policy" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-keystoneclient" },
@@ -1842,6 +1876,8 @@ requires-dist = [
     { name = "jinja2", marker = "extra == 'service'", specifier = "==3.1.6" },
     { name = "keystoneauth1", marker = "extra == 'service'", specifier = ">=5.12.0" },
     { name = "openstacksdk", marker = "extra == 'service'", specifier = "==3.3.0" },
+    { name = "oslo-config", marker = "extra == 'service'", specifier = ">=9.6.0" },
+    { name = "oslo-policy", marker = "extra == 'service'", specifier = ">=6.0.0" },
     { name = "pydantic", marker = "extra == 'service'", specifier = "==2.13.4" },
     { name = "pydantic-settings", marker = "extra == 'service'", specifier = "==2.14.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },

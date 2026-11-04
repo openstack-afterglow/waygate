@@ -239,7 +239,7 @@ def test_docker_build_owns_push_tag_and_dispatch_testing():
     triggers = _triggers(_load("docker-build.yml"))
 
     assert set(triggers) == {"pull_request", "push", "workflow_dispatch"}
-    assert triggers["push"] == {"branches": ["main", "dev"], "tags": ["v*"]}
+    assert triggers["push"] == {"branches": ["main", "dev"], "tags": ["[0-9]*.[0-9]*.[0-9]*", "v*"]}
 
 
 def test_pull_request_trigger_sets_are_identical():

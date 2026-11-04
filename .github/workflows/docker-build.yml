@@ -5,7 +5,7 @@ on:
     branches: [main, dev]
   push:
     branches: [main, dev]
-    tags: ['v*']
+    tags: ['[0-9]*.[0-9]*.[0-9]*', 'v*']
   workflow_dispatch:
 
 env:

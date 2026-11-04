@@ -2,6 +2,9 @@
 - name: Include pull tasks
   ansible.builtin.include_tasks: pull.yml
 
+- name: Include config tasks before bootstrap and start
+  ansible.builtin.include_tasks: config.yml
+
 - name: Include bootstrap service tasks
   ansible.builtin.include_tasks: bootstrap_service.yml
 

@@ -184,6 +184,8 @@ class WaygateExecutionGrant(Base):
     trust_id: Mapped[str | None] = mapped_column(VARCHAR(64), unique=True)
     trustee_user_id: Mapped[str | None] = mapped_column(VARCHAR(64))
     role_id: Mapped[str | None] = mapped_column(VARCHAR(64))
+    execution_mode: Mapped[str] = mapped_column(VARCHAR(32), nullable=False, default="caller_trust", server_default="caller_trust")
+    executor_user_id: Mapped[str | None] = mapped_column(VARCHAR(64))
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, default="admitting")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

@@ -88,8 +88,10 @@ def test_server_client_defaults_migration_preserves_explicit_legacy_settings():
 def test_native_migration_manifest_includes_additive_owner_upgrade():
     assert [entry.logical_id for entry in migrate.load_manifest()] == [
         "001_baseline", "002_agent_install_mode_and_token_rotation", "003_client_tunnel_settings",
-        "004_server_client_defaults", "005_client_owner", "006_execution_grants",
+        "004_server_client_defaults", "005_client_owner", "006_execution_grants", "007_admin_execution",
     ]
+    manifest = {entry.logical_id: entry for entry in migrate.load_manifest()}
+    assert manifest["007_admin_execution"].sha256 == "2dd4d14afa2a5a50aa853d0e4101dc044f5d7858bc57889245d0ebbe1a9f47fb"
 
 
 def test_owner_upgrade_preserves_credentials_and_leaves_legacy_clients_unassigned(tmp_path):

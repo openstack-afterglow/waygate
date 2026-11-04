@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from waygate.auth import require_credentials_admin
+from waygate.auth import require_action
 from waygate.db import is_db_available
 from waygate.models.schemas import WaygateExportRequest, WaygateImportRequest, WaygateImportResult
 from waygate.services import waygate_db, waygate_migration
@@ -35,7 +35,7 @@ async def _get_owned_server(project_id: str, server_id: str) -> dict:
 async def export_waygate_server(
     server_id: str,
     body: WaygateExportRequest,
-    token_info: dict = Depends(require_credentials_admin),
+    token_info: dict = Depends(require_action("waygate:bundle:export")),
 ):
     """서버의 클라이언트+네트워크 연결을 패스프레이즈로 래핑한 번들 JSON 으로 내보낸다.
 
@@ -64,7 +64,7 @@ async def export_waygate_server(
 async def import_waygate_server(
     server_id: str,
     body: WaygateImportRequest,
-    token_info: dict = Depends(require_credentials_admin),
+    token_info: dict = Depends(require_action("waygate:bundle:import")),
 ):
     """번들의 클라이언트를 (이미 프로비저닝된) 대상 서버로 재생성한다."""
     _require_db()

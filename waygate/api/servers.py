@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from waygate.auth import require_gateways_admin, require_gateways_editor, require_inventory
+from waygate.auth import require_action
 from waygate.config import get_settings
 from waygate.db import is_db_available
 from waygate.models.schemas import (
@@ -45,7 +45,7 @@ async def _merge_status(server: dict) -> WaygateServerInfo:
 @router.post("/", status_code=201, response_model=WaygateServerInfo, include_in_schema=False)
 async def create_waygate_server(
     body: WaygateServerCreateRequest,
-    token_info: dict = Depends(require_gateways_editor),
+    token_info: dict = Depends(require_action("waygate:server:create")),
 ):
     """Waygate 서버 프로비저닝 요청 — CREATING 상태로 즉시 응답, 백그라운드에서 부팅."""
     _require_db()
@@ -98,7 +98,7 @@ async def create_waygate_server(
 
 @router.get("", response_model=list[WaygateServerInfo])
 @router.get("/", response_model=list[WaygateServerInfo], include_in_schema=False)
-async def list_waygate_servers(token_info: dict = Depends(require_inventory)):
+async def list_waygate_servers(token_info: dict = Depends(require_action("waygate:server:list"))):
     _require_db()
     project_id = token_info["project_id"]
     servers = await waygate_db.list_servers(project_id)
@@ -106,7 +106,7 @@ async def list_waygate_servers(token_info: dict = Depends(require_inventory)):
 
 
 @router.get("/{server_id}", response_model=WaygateServerInfo)
-async def get_waygate_server(server_id: str, token_info: dict = Depends(require_inventory)):
+async def get_waygate_server(server_id: str, token_info: dict = Depends(require_action("waygate:server:get"))):
     _require_db()
     project_id = token_info["project_id"]
     server = await waygate_db.get_server(project_id, server_id)
@@ -120,7 +120,7 @@ async def get_waygate_server(server_id: str, token_info: dict = Depends(require_
 async def update_waygate_server(
     server_id: str,
     body: WaygateServerUpdateRequest,
-    token_info: dict = Depends(require_gateways_editor),
+    token_info: dict = Depends(require_action("waygate:server:update")),
 ):
     _require_db()
     try:
@@ -135,7 +135,7 @@ async def update_waygate_server(
 
 
 @router.post("/{server_id}/agent-token/rotate", status_code=202, response_model=WaygateServerInfo)
-async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(require_gateways_admin)):
+async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(require_action("waygate:server:rotate-agent-token"))):
     """Stage an agent credential handoff without exposing the token to the tenant."""
     _require_db()
     project_id = token_info["project_id"]
@@ -153,7 +153,7 @@ async def rotate_waygate_agent_token(server_id: str, token_info: dict = Depends(
 
 
 @router.delete("/{server_id}", status_code=202, response_model=WaygateServerDeleteResponse)
-async def delete_waygate_server_endpoint(server_id: str, token_info: dict = Depends(require_gateways_admin)):
+async def delete_waygate_server_endpoint(server_id: str, token_info: dict = Depends(require_action("waygate:server:delete"))):
     _require_db()
     project_id = token_info["project_id"]
     if not await waygate_db.get_server(project_id, server_id):

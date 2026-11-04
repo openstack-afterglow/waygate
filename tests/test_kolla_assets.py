@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tomllib
 import zipfile
@@ -148,6 +149,7 @@ def test_sentinel_template_renders_all_valkey_hosts_and_monitor_name():
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
     env.filters["kolla_address"] = lambda network, host: addresses[host]
     env.filters["bool"] = bool
+    env.filters["to_json"] = json.dumps
     inventory = {
         "groups": {"valkey": list(addresses)},
         "valkey_sentinel_port": 26379,
@@ -162,6 +164,7 @@ def test_sentinel_template_renders_all_valkey_hosts_and_monitor_name():
         "waygate_redis_url": "redis://localhost:6379/6",
         "waygate_default_listen_port": 51820,
         "openstack_insecure": False,
+        "waygate_oslo_policy_dirs": [],
     })
     rendered = tomllib.loads(env.from_string(source).render(variables))["cache"]
     assert rendered["sentinel_enabled"] is True

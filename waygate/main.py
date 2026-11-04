@@ -12,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from waygate.api import agent, attachments, clients, migration, resource_policies, servers
+from waygate.api import agent, attachments, clients, migration, policy, resource_policies, servers
 from waygate.cache import close_cache
 from waygate.config import get_settings, require_public_callback_base_url
 from waygate.db import close_db, init_db
@@ -59,6 +59,7 @@ app.add_middleware(SafeAccessLog)
 for route in (servers.router, clients.router, attachments.router, migration.router, agent.router):
     app.include_router(route, prefix="/v1/servers")
 app.include_router(resource_policies.router, prefix="/v1/admin", tags=["admin-resource-policies"])
+app.include_router(policy.router, prefix="/v1/policy", tags=["policy"])
 
 
 def _version_document(request: Request) -> dict:

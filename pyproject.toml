@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "waygate"
-version = "0.3.5"
+version = "0.3.6"
 description = "OpenStack-native WireGuard gateway service"
 requires-python = ">=3.11"
 [project.optional-dependencies]
@@ -16,6 +16,8 @@ service = [
     "openstacksdk==3.3.0",
     "keystoneauth1>=5.12.0",
     "python-keystoneclient==5.4.0",
+    "oslo.config>=9.6.0",
+    "oslo.policy>=6.0.0",
     "jinja2==3.1.6",
     "pydantic==2.13.4",
     "pydantic-settings==2.14.2",
@@ -41,6 +43,12 @@ waygate-api = "waygate.main:run"
 waygate-worker = "waygate.worker:main"
 waygate-migrate = "waygate.scripts.migrate:main"
 waygate-cutover = "waygate.scripts.cutover:main"
+
+[project.entry-points."oslo.policy.policies"]
+waygate = "waygate.policy:list_rules"
+
+[project.entry-points."oslo.policy.enforcer"]
+waygate = "waygate.policy:get_enforcer"
 
 [tool.hatch.metadata]
 allow-direct-references = true

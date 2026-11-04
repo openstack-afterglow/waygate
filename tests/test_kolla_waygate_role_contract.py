@@ -44,7 +44,9 @@ def test_lifecycle_actions_include_tasks_in_the_expected_order() -> None:
 
     assert deploy.index("Include precheck tasks") < deploy.index("Include precondition tasks")
     assert reconfigure.index("Include precheck tasks") < reconfigure.index("Include config tasks")
-    assert upgrade.index("Include pull tasks") < upgrade.index("Include bootstrap service tasks")
+    assert upgrade.index("Include pull tasks") < upgrade.index("Include config tasks")
+    assert upgrade.index("Include config tasks") < upgrade.index("Include bootstrap service tasks")
+    assert upgrade.index("Include config tasks") < upgrade.index("Include start tasks")
     assert pull.index("Include Waygate image precheck tasks") < pull.index("Pull | Pull Waygate images")
     assert "include_tasks: image_precheck.yml" in precheck
     assert "include_tasks: image_precheck.yml" in pull
@@ -180,3 +182,14 @@ def test_extracted_service_health_check_uses_python_available_in_published_image
         defaults,
     )
     assert not re.search(r'test: \["CMD", "curl", "-f"', defaults)
+
+
+def test_policy_config_dir_mounted_readonly_and_initialized_without_overwrite() -> None:
+    defaults = _read("defaults/main.yml")
+    config = _read("tasks/config.yml")
+
+    assert defaults.count('"/etc/kolla/waygate:/etc/waygate:ro"') >= 2
+    assert '"/etc/kolla/waygate/policy.yaml:/etc/waygate/policy.yaml' not in defaults
+    assert "Initialize policy overrides without replacing operator rules" in config
+    assert 'dest: "{{ waygate_config_dir }}/policy.yaml"' in config
+    assert "force: false" in config

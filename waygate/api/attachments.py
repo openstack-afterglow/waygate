@@ -8,7 +8,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from waygate.auth import require_inventory, require_routing_admin
+from waygate.auth import require_action
 from waygate.db import is_db_available
 from waygate.models.schemas import WaygateNetworkAttachCreateRequest, WaygateNetworkAttachmentInfo
 from waygate.services import execution, waygate_db, waygate_network
@@ -40,7 +40,7 @@ def _to_info(att: dict) -> WaygateNetworkAttachmentInfo:
 async def attach_waygate_network(
     server_id: str,
     body: WaygateNetworkAttachCreateRequest,
-    token_info: dict = Depends(require_routing_admin),
+    token_info: dict = Depends(require_action("waygate:network:attach")),
 ):
     """Waygate 서버에 테넌트 네트워크를 추가 연결(멀티 NIC + SNAT). 서버가 ACTIVE 여야 한다."""
     _require_db()
@@ -61,7 +61,7 @@ async def attach_waygate_network(
 
 
 @router.get("/{server_id}/networks", response_model=list[WaygateNetworkAttachmentInfo])
-async def list_waygate_networks(server_id: str, token_info: dict = Depends(require_inventory)):
+async def list_waygate_networks(server_id: str, token_info: dict = Depends(require_action("waygate:network:list"))):
     _require_db()
     project_id = token_info["project_id"]
     await _get_owned_server(project_id, server_id)
@@ -70,7 +70,7 @@ async def list_waygate_networks(server_id: str, token_info: dict = Depends(requi
 
 
 @router.delete("/{server_id}/networks/{attachment_id}", status_code=204)
-async def detach_waygate_network(server_id: str, attachment_id: int, token_info: dict = Depends(require_routing_admin)):
+async def detach_waygate_network(server_id: str, attachment_id: int, token_info: dict = Depends(require_action("waygate:network:detach"))):
     _require_db()
     project_id = token_info["project_id"]
     server = await _get_owned_server(project_id, server_id)

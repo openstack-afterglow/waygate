@@ -33,3 +33,7 @@ default_tunnel_cidr = "{{ waygate_default_tunnel_cidr }}"
 default_listen_port = {{ waygate_default_listen_port }}
 encryption_key = "{{ waygate_encryption_key }}"
 trusted_proxies = "{{ waygate_trusted_proxies }}"
+
+[oslo_policy]
+policy_file = "{{ waygate_oslo_policy_file }}"
+policy_dirs = {{ waygate_oslo_policy_dirs | to_json }}

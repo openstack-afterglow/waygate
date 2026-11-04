@@ -9,7 +9,7 @@ from contextlib import suppress
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from waygate.auth import require_admin, require_token
+from waygate.auth import require_action
 from waygate.config import get_settings
 from waygate.services import resource_policies
 
@@ -53,7 +53,7 @@ async def get_admin_os_conn() -> AsyncIterator:
             await asyncio.to_thread(connection.close)
 
 
-@router.get("/resource-policies", dependencies=[Depends(require_admin)])
+@router.get("/resource-policies", dependencies=[Depends(require_action("waygate:resource-policy:list"))])
 async def list_resource_policies(conn=Depends(get_admin_os_conn)):
     try:
         return await resource_policies.inspect_policies(conn)
@@ -61,7 +61,7 @@ async def list_resource_policies(conn=Depends(get_admin_os_conn)):
         raise HTTPException(status_code=503, detail="리소스 정책 저장소를 사용할 수 없습니다") from exc
 
 
-@router.get("/resource-policies/catalog/{policy_key}", dependencies=[Depends(require_admin)])
+@router.get("/resource-policies/catalog/{policy_key}", dependencies=[Depends(require_action("waygate:resource-policy:catalog"))])
 async def discover_resource_policy_options(policy_key: str, conn=Depends(get_admin_os_conn)):
     try:
         spec = resource_policies.get_spec(policy_key)
@@ -80,11 +80,11 @@ async def discover_resource_policy_options(policy_key: str, conn=Depends(get_adm
         raise HTTPException(status_code=503, detail="OpenStack 리소스 목록을 조회할 수 없습니다") from exc
 
 
-@router.put("/resource-policies/{policy_key}", dependencies=[Depends(require_admin)])
+@router.put("/resource-policies/{policy_key}")
 async def update_resource_policy(
     policy_key: str,
     body: ResourcePolicyUpdate,
-    token_info: dict = Depends(require_token),
+    token_info: dict = Depends(require_action("waygate:resource-policy:update")),
     conn=Depends(get_admin_os_conn),
 ):
     try:
