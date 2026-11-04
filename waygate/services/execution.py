@@ -10,7 +10,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
+from keystoneauth1 import access as ks_access
+from keystoneauth1 import plugin as ks_plugin
 from keystoneauth1 import session as ks_session
+from keystoneauth1 import token_endpoint
 from keystoneauth1.exceptions.http import Forbidden, NotFound, Unauthorized
 from keystoneauth1.identity import v3
 from keystoneclient.v3 import client as ks_client
@@ -173,29 +176,48 @@ def _validate_trust(trust, grant: ExecutionGrant) -> None:
         raise ExecutionDenied("Waygate execution delegation scope does not match")
 
 
+def _delegated_roles(directory, grant: ExecutionGrant) -> dict[str, str]:
+    """Only the current native descendants of the one delegated role may execute."""
+    try:
+        rows, closure = auth._current_role_graph(directory, project=True)
+        delegated = rows.get(grant.role_id, {}).get("name")
+        core = ("member", "manager", "admin")
+        if delegated not in core:
+            raise ExecutionDenied("Delegated native role is no longer a management role")
+        role_ids = closure(grant.role_id)
+        ceiling = {"reader", *core[:core.index(delegated) + 1]}
+        if any(rows[role_id]["name"].casefold() in set(core) - ceiling for role_id in role_ids):
+            raise ExecutionDenied("Delegated native role implies higher management authority")
+        return {role_id: rows[role_id]["name"] for role_id in role_ids}
+    except auth.AuthorityRejected:
+        raise ExecutionDenied("Waygate execution role graph was rejected") from None
+    except ExecutionDenied:
+        raise
+    except Exception as exc:
+        raise ExecutionUnavailable("Waygate execution role graph is unavailable") from exc
+
+
 def _validate_access(access, grant: ExecutionGrant) -> None:
     directory = auth._get_admin_ks_client()
     try:
-        rows, _names = auth._role_catalog(directory)
+        allowed = _delegated_roles(directory, grant)
     finally:
         _close_session(directory.session)
-    delegated = rows.get(grant.role_id, {}).get("name")
-    core = ("member", "manager", "admin")
-    if delegated not in core:
-        raise ExecutionDenied("Delegated native role is no longer a management role")
-    allowed_names = {"reader", *core[:core.index(delegated) + 1]}
-    allowed_ids = {role_id for role_id, role in rows.items() if role["name"] in allowed_names}
+    role_ids, role_names = access.role_ids or [], access.role_names or []
     if (
         access.trust_id != grant.trust_id
         or access.trustor_user_id != grant.user_id
         or access.trustee_user_id != grant.trustee_user_id
         or access.user_id != grant.user_id
         or access.project_id != grant.project_id
-        or grant.role_id not in access.role_ids
-        or not set(access.role_names) <= allowed_names
-        or not set(access.role_ids) <= allowed_ids
+        or grant.role_id not in role_ids
+        or len(role_ids) != len(role_names)
+        or len(set(role_ids)) != len(role_ids)
+        or any(allowed.get(role_id) != name for role_id, name in zip(role_ids, role_names, strict=True))
+        # Keystone's password-issued Trust token may outlive Trust.expires_at.
+        # The operation/Trust deadline is independent and checked before every send.
         or not access.expires
-        or _utc(access.expires) > grant.expires_at
+        or datetime.now(UTC) >= grant.expires_at
         or _utc(access.expires) <= datetime.now(UTC)
     ):
         raise ExecutionDenied("Waygate execution token scope does not match")
@@ -273,6 +295,9 @@ class _ExecutionSession(ks_session.Session):
 
     def _send_request(self, url, method, *args, **kwargs):
         # Recheck after slow authority/auth/discovery and on each native retry.
+        _verify_current(self.grant)
+        if self.auth.auth_ref is not None:
+            _validate_access(self.auth.auth_ref, self.grant)
         self._check_claim()
         return super()._send_request(url, method, *args, **kwargs)
 
@@ -280,8 +305,18 @@ class _ExecutionSession(ks_session.Session):
 def _create_trust(token: str, grant: ExecutionGrant) -> ExecutionGrant:
     settings = get_settings()
     directory = auth._get_admin_ks_client()
+    try:
+        identity_endpoint = directory.session.get_endpoint(
+            service_type="identity", interface=ks_plugin.AUTH_INTERFACE,
+            min_version="3.0", max_version="3.latest",
+        )
+        if not identity_endpoint:
+            raise ExecutionUnavailable("Waygate identity v3 endpoint is unavailable")
+    except BaseException:
+        _close_session(directory.session)
+        raise
     caller_session = ks_session.Session(
-        auth=v3.Token(auth_url=settings.os_auth_url, token=token, project_id=grant.project_id),
+        auth=token_endpoint.Token(endpoint=identity_endpoint, token=token),
         timeout=30,
         verify=settings.ssl_verify,
     )
@@ -292,12 +327,25 @@ def _create_trust(token: str, grant: ExecutionGrant) -> ExecutionGrant:
         trustee_access = directory.session.auth.get_access(directory.session)
         if trustee_access.trust_scoped or not trustee_access.user_id or not trustee_access.project_id:
             raise ExecutionDenied("A service-project trustee identity is required")
-        caller_access = caller_session.auth.get_access(caller_session)
+        # Inspect and use the exact original credential; v3.Token would reissue it
+        # with today's roles and could erase its original privilege ceiling.
+        body = directory.tokens.get_token_data(token, include_catalog=False)
+        caller_access = ks_access.create(body=body, auth_token=token)
+        methods = body["token"].get("methods") or []
+        allowed = _delegated_roles(directory, replace(grant, role_id=role_id))
+        issued = dict(zip(caller_access.role_ids or [], caller_access.role_names or [], strict=True))
         if (
             caller_access.user_id != grant.user_id
             or caller_access.project_id != grant.project_id
             or caller_access.trust_scoped
             or caller_access.application_credential_id
+            or not methods
+            or set(methods) - {"password", "token", "totp", "mapped", "external", "openid"}
+            or body["token"].get("OS-OAUTH1")
+            or body["token"].get("oauth2_credential")
+            or not caller_access.expires
+            or _utc(caller_access.expires) <= datetime.now(UTC)
+            or any(issued.get(role_id) != name for role_id, name in allowed.items())
         ):
             raise ExecutionDenied("An original project-scoped user token is required for delegation")
         grant = replace(grant, trustee_user_id=trustee_access.user_id, role_id=role_id)

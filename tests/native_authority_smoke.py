@@ -27,7 +27,7 @@ from test_execution_delegation import (
     _handler,
 )
 
-from waygate import db
+from waygate import __version__, db
 from waygate.models.orm import ResourcePolicy
 
 
@@ -214,7 +214,7 @@ def main():
         json.dumps(
             {
                 "service": "waygate",
-                "version": "0.3.6",
+                "version": __version__,
                 "transport": "real-loopback-uvicorn-installed-sdk",
                 "schema": "disposable-sqlite",
                 "native_implications": {},

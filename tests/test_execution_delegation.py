@@ -80,6 +80,7 @@ class SyntheticCloud:
     def __init__(self):
         self.lock = threading.Lock()
         self.base = ""
+        self.token_lifetime = timedelta(hours=1)
         self.users = {"user-a": True, "user-b": True, SERVICE_USER: True}
         self.projects = {"project-a": True, SERVICE_PROJECT: True}
         self.assignments = {
@@ -87,6 +88,8 @@ class SyntheticCloud:
             ("user-b", "project-a"): set(ADMIN),
             (SERVICE_USER, SERVICE_PROJECT): {"admin"},
         }
+        self.user_groups: dict[str, set[str]] = {}
+        self.project_group_assignments: dict[tuple[str, str], set[str]] = {}
         self.system_assignments: list[dict] = []
         self.role_assignment_queries: list[dict] = []
         self.incompatible_effective_system = False
@@ -94,6 +97,7 @@ class SyntheticCloud:
         self.tokens: dict[str, dict] = {}
         self.trusts: dict[str, dict] = {}
         self.auth_requests: list[dict] = []
+        self.validation_requests: list[tuple[str, dict]] = []
         self.cloud_requests: list[tuple[str, str, dict]] = []
         self.trust_deletes: list[tuple[str, str]] = []
         self.fail_trust_delete = 0
@@ -121,16 +125,19 @@ class SyntheticCloud:
     def effective(self, user: str, project: str) -> set[str]:
         if not self.users.get(user) or not self.projects.get(project):
             return set()
-        return self.closure(self.assignments.get((user, project), set()))
+        assigned = set(self.assignments.get((user, project), set()))
+        for group in self.user_groups.get(user, set()):
+            assigned.update(self.project_group_assignments.get((group, project), set()))
+        return self.closure(assigned)
 
     def login(self, user: str, project: str) -> str:
         return self.issue(["password"], user, project, self.effective(user, project))
 
     def issue(self, methods, user, project, roles, trust=None) -> str:
         token = "tok-" + uuid.uuid4().hex
-        expires = datetime.now(UTC) + timedelta(hours=1)
-        if trust is not None:
-            expires = min(expires, trust["expires"])
+        # Keystone password Trust authentication uses the configured token lifetime;
+        # it does not clamp expires_at to the Trust's independent expiry.
+        expires = datetime.now(UTC) + self.token_lifetime
         self.tokens[token] = {
             "methods": methods,
             "user": user,
@@ -314,6 +321,14 @@ def _handler(cloud: SyntheticCloud):
             self.dispatch("DELETE")
 
         def route(self, method, path, query, body):
+            if path == "/" and method == "GET":
+                return 300, {"versions": {"values": [{
+                    "id": "v3.14", "status": "stable", "updated": "2026-01-01T00:00:00Z",
+                    "links": [{"rel": "self", "href": cloud.base + "/v3/"}],
+                }]}}
+            if path == "/auth/tokens":
+                # Native Keystone also accepts its v3 authentication path at root.
+                path = "/v3/auth/tokens"
             if path == "/v3" and method == "GET":
                 return 200, {
                     "version": {
@@ -333,6 +348,7 @@ def _handler(cloud: SyntheticCloud):
                 return 201, (cloud.token_body(token), token)
             if path == "/v3/auth/tokens" and method == "GET":
                 subject = self.headers.get("X-Subject-Token")
+                cloud.validation_requests.append((subject, query))
                 if subject not in cloud.tokens:
                     return 404, {"error": {"code": 404, "message": "unknown synthetic token"}}
                 return 200, (cloud.token_body(subject), subject)
@@ -398,7 +414,9 @@ def _handler(cloud: SyntheticCloud):
             if caller["user"] != SERVICE_USER or caller["trust"] is not None:
                 return 403, {"error": {"code": 403, "message": "directory reads require the service identity"}}
             if path.startswith("/v3/users/") and path.endswith("/groups"):
-                return 200, {"groups": [], "links": {"next": None}}
+                user = path.removeprefix("/v3/users/").removesuffix("/groups")
+                return 200, {"groups": [{"id": group} for group in sorted(cloud.user_groups.get(user, set()))],
+                             "links": {"next": None}}
             if path == "/v3/domains/default":
                 return 200, {"domain": {"id": "default", "enabled": True}}
             if path == "/v3/roles":

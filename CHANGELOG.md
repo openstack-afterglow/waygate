@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.7 — candidate prepared 2026-11-04 UTC (not published/deployed)
+
+### 한국어
+- **버전/일자:** 0.3.7; 준비 2026-11-04 UTC. 발행/운영 배포 일시: 아직 없음.
+- **변경/수정:** Keystone password Trust token의 24시간 만료와 독립적인 2시간 operation/Trust 기한을 분리하여 정상 member 실행의 잘못된403을 수정한다. 원본 token을 교환하지 않고 native v3 auth endpoint discovery를 거쳐 Trust를 생성하며, 현재 delegated role의 정확한 ID/name closure와 core ceiling을 cached token에도 매 send 전 적용한다. Versioned/unversioned auth URL, 원본 credential, 철회·만료 및 실제 Uvicorn/worker/installed SDK loopback 회귀를 포함한다.
+- **폐기/제거:** 없음. Schema, dependency, native policy/IAM, VM agent 및 gateway image 변경 없음.
+
+### English
+- **Version/date:** 0.3.7; prepared 2026-11-04 UTC. Publication/deployment dates: None yet.
+- **Changes/fixes:** Separate native password Trust token expiration from the independent two-hour operation/Trust deadline, fixing erroneous403 for valid member execution with24-hour Keystone tokens. Preserve the exact original credential through native v3 authentication-endpoint discovery. Bound exact token role IDs/names by the delegated role's current inference closure and core ceiling, including cached tokens before every send. Add versioned/unversioned installed-SDK regressions and actual Uvicorn/worker loopback smoke.
+- **Deprecated/removed:** None. No schema, dependency, native policy/IAM, VM-agent or gateway-image change.
+
 ## 0.3.6 — candidate prepared 2026-11-04 UTC (not published/deployed)
 
 ### 한국어

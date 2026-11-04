@@ -1,3 +1,36 @@
+# Waygate 0.3.7 — native Trust execution correction candidate
+
+## 한국어
+- **버전/일자:** 0.3.7; 준비 2026-11-04 UTC. 발행/운영 배포 일시: 아직 없음.
+- **변경/수정:** Keystone의24시간 password Trust token과 독립적인2시간 operation/Trust 기한을 각각 검증한다. 원본 token 재발급 없이 v3 auth endpoint를 discovery하여 Trust를 생성하고, delegated role의 현재 정확한 ID/name closure와 core-role ceiling을 cached token에도 매 send 전 적용한다. Native project/group implication 및 철회·만료 경계를 유지한다.
+- **폐기/제거:** 없음. Schema, dependency, native policy/IAM, VM agent 및 gateway image 변경 없음.
+
+## English
+- **Version/date:** 0.3.7; prepared 2026-11-04 UTC. Publication/deployment dates: None yet.
+- **Changes/fixes:** Validate native24-hour password Trust tokens independently of the two-hour operation/Trust deadline. Discover the v3 authentication endpoint and use the exact inspected original token without reissue. Recheck current delegated role-ID/name closure and core-role ceiling even for cached tokens before sends; retain current native project/group implications and expiration/revocation fences.
+- **Deprecated/removed:** None. No schema, dependency, native policy/IAM, VM-agent or gateway-image change.
+
+## 0.3.7 source provenance and release boundaries
+
+Base is published numeric tag `0.3.6`, current `origin/dev` commit `8a62fd9f1e8deabebb0d78a39720675992940569` (GitHub publication2026-11-04T04:55:18Z). Never replace that tag or its artifacts. The isolated correction comes from the tested six-path scope patch (SHA256 `69197275964d26a5728b79cf725cb29bd94cc6d42d669c2ab24692a5acda1a94`), excluding unrelated shared primary policy/admin-executor/job WIP. Root/runtime/lock/Kolla registry default advance to0.3.7; SDK remains0.2.0. No new package selection or migration is introduced.
+
+Production diagnosis is strongly supported, not direct capture of the failed token: sanitized matching create403/grant timestamps, native token expiration86400 and installed Keystone password issuance show the expiry mismatch mechanism; the actual failed token was not retained. Versioned and unversioned loopback regressions reproduce the mechanism using real installed SDKs, not production credentials. No production write/replay or live correction is claimed.
+
+Retain immutable001–007 ledger/checksums. A0.3.6 installation with verified007 needs no new ALTER; older001–006 installs must apply007 before API/worker startup. Back up DB/key/config and prior immutable images, quiesce lifecycle admission and drain/stop workers before separately approved cohort replacement. Publish exact-source API and worker images only after owner-approved commit/tag CI; install the same-source release wheel/Kolla role and pin qualified digests. Source-mode operators must override the retained stale source pin. Preserve operator policy, Sentinel, callbacks, existing VM agents/Glance images and native provider policy. No new gateway image, IAM assignment or policy relaxation is required.
+
+Focused/full service tests, independent SDK checks, canonical architecture guard and actual Uvicorn/worker installed-SDK loopback smoke are local qualification lanes. Image builds/publication, release wheel/assets, immutable CI and authenticated fresh live lifecycle remain separate gates; historical receipts below do not qualify0.3.7.
+
+### Local0.3.7 qualification — 2026-11-04 UTC
+
+Reviewed runtime/test source digest: `177c6213d25436d878fda1bf19b1f580de04d04184081ad12b3bfa16f64087b6` (canonical guard128 files), based on dev/released0.3.6 commit above; no new release commit exists yet. Frozen service/dev Python3.12.13 uses installed OpenStack SDK3.3.0. Focused execution/inference suite: **94 passed**. Full `pytest tests -q -n4 --dist worksteal`: **1501 passed, 3 opt-in skipped**. Root Ruff and SDK-tree Ruff passed. Existing Keystone HTTPClient deprecations emitted16616 warnings; these are not suppressed or recast as new functional failures.
+
+Independent SDK frozen all-extras environment: **44 passed**,44 existing SDK service_type deprecation warnings (SDK lock selects OpenStack SDK4.18.0). Initial SDK collection from the root environment lacked `responses`; that prerequisite failure is retained separately and resolved with the canonical SDK environment, not a product change.
+
+Actual Uvicorn/worker subprocess smoke passed for **versioned and unversioned auth URLs**: valid24h token/2h operation creates201 and worker reaches PROVISIONING; original-reader/current-member403, queued member revocation ERROR with zero provider sends, and zero token exchanges. Existing core-role Uvicorn smoke passed member/manager/admin create201/delete202 and reader/restricted-reader403. Providers are loopback synthetic and DB is scratch SQLite; PROVISIONING is not guest readiness.
+
+The final correction additionally casefolds only higher-core role classification to match oslo.policy; unique `Manager`/`ADMIN` implications reject while exact token ID/name matching remains unchanged. Full service/focused tests and smoke above ran after this correction. No MariaDB/image build, publication, live-cloud or production acceptance is supplied by these lanes.
+
+
 # Waygate 0.3.6 — standard project authority candidate
 
 ## 한국어
