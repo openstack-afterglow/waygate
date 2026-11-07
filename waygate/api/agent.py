@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 
 from waygate.models.schemas import WaygateAgentDesiredState, WaygateAgentRegisterRequest, WaygateAgentStatusReport
 from waygate.rate_limit import limiter
-from waygate.services import waygate_agent_auth, waygate_config, waygate_db
+from waygate.services import waygate_agent_auth, waygate_agent_telemetry, waygate_config, waygate_db
 
 router = APIRouter()
 _logger = logging.getLogger(__name__)
@@ -72,6 +72,7 @@ async def register_waygate_agent(
         server_public_key=body.public_key,
     )
     _logger.info("waygate agent register: server=%s status=%s->%s", server_id, server["status"], new_status)
+    waygate_agent_telemetry.observe_register(server_id)
 
 
 @router.get("/{server_id}/agent/desired-state", response_model=WaygateAgentDesiredState)
@@ -108,13 +109,15 @@ async def get_desired_state(request: Request, server_id: str):
 
     nat_networks = await waygate_db.list_active_attachment_cidrs(server_id)
 
-    return waygate_config.render_agent_desired_state(
+    desired = waygate_config.render_agent_desired_state(
         listen_port=server["listen_port"],
         tunnel_cidr=server["tunnel_cidr"],
         clients=client_payload,
         nat_networks=nat_networks,
         next_token=await waygate_agent_auth.get_pending_next_token(server_id),
     )
+    waygate_agent_telemetry.observe_desired_state(server_id)
+    return desired
 
 
 def _status_agent_key(request: Request) -> str:
@@ -131,9 +134,22 @@ async def report_waygate_status(
     server_id: str,
     body: WaygateAgentStatusReport,
 ):
-    """Acknowledge only a successful five-minute Valkey observation write."""
+    """Acknowledge a five-minute Valkey peer observation, or an agent diagnostic-only report.
+
+    A report whose diagnostics say WireGuard could not be read carries no peer
+    observation: it never replaces cached peers and is acknowledged after only
+    the best-effort telemetry record.
+    """
     await _verify_and_bind(request, server_id)
-    try:
-        await waygate_agent_auth.store_status_result(server_id, body)
-    except waygate_agent_auth.StatusStoreUnavailable:
-        raise HTTPException(status_code=503, detail="Agent status storage unavailable") from None
+    if body.peers_observed:
+        try:
+            await waygate_agent_auth.store_status_result(server_id, body)
+        except waygate_agent_auth.StatusStoreUnavailable:
+            raise HTTPException(status_code=503, detail="Agent status storage unavailable") from None
+    waygate_agent_telemetry.observe_status(
+        server_id,
+        peers=len(body.peers) if body.peers_observed else None,
+        agent_source=body.agent_source,
+        report_interval_seconds=body.report_interval_seconds,
+        diagnostics=body.diagnostics,
+    )

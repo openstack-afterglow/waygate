@@ -9,6 +9,7 @@ _ALIASES = {
     "neutron": "waygate.services.openstack_ops",
     "nova": "waygate.services.openstack_ops",
     "waygate_agent_auth": "waygate.services.agent_auth",
+    "waygate_agent_telemetry": "waygate.services.agent_telemetry",
     "waygate_config": "waygate.services.config_render",
     "waygate_db": "waygate.services.store",
     "waygate_ipam": "waygate.services.ipam",

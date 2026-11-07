@@ -96,6 +96,8 @@ if command == "systemctl":
             sys.exit(1)
         state["timer_active" if args[1].endswith(".timer") else "service_active"] = False
     elif action == "disable":
+        if "--now" in args:
+            state["timer_active"] = False
         state["timer_enabled"] = False
     elif action == "enable":
         if args != ["enable", "--now", "afterglow-waygate-reconcile.service"]:
@@ -197,6 +199,51 @@ def test_install_on_fresh_system_never_tries_to_stop_missing_units(installer_run
     controls = [call for line in events.read_text().splitlines() if (call := json.loads(line))[0] == "systemctl"]
     assert all(call[1] not in ("stop", "disable") for call in controls)
     assert controls[-1] == ["systemctl", "daemon-reload"]
+
+
+def test_prebuilt_userdata_replaces_stale_image_oneshot_agent(installer_runtime):
+    """A pre-0.3.0 prebuilt image (timer + Type=oneshot unit) must end with the current long-running agent."""
+    root, state, events = installer_runtime
+    userdata = yaml.safe_load(
+        base64.b64decode(
+            render_agent_userdata(
+                server_name="stale-gateway",
+                listen_port=51820,
+                tunnel_cidr="10.8.0.0/24",
+                register_url="https://waygate.example/v1/servers/s1/agent/register",
+                desired_state_url="https://waygate.example/v1/servers/s1/agent/desired-state",
+                status_url="https://waygate.example/v1/servers/s1/agent/status",
+                bootstrap_token="current-token-abcdefghijklmnop",
+                install_packages=False,
+            )
+        )
+    )
+    for entry in userdata["write_files"]:
+        path = root / entry["path"].lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(entry["content"])
+        path.chmod(int(entry["permissions"], 8))
+    # Run the real runcmd lines through sh -e with systemctl/rm redirected into the
+    # guest root. Kernel sysctl and the networked register step are out of scope.
+    lines = [line for line in userdata["runcmd"] if not line.startswith(("sysctl ", "/usr/bin/python3 "))]
+    subprocess.run(["sh", "-ec", "\n".join(lines)], check=True)
+
+    units = root / "etc/systemd/system"
+    assert {unit.name for unit in units.iterdir()} == {"afterglow-waygate-reconcile.service", "timers.target.wants"}
+    assert list((units / "timers.target.wants").iterdir()) == []
+    service = configparser.ConfigParser()
+    service.read(units / "afterglow-waygate-reconcile.service")
+    assert service["Service"]["Type"] == "simple"
+    assert shlex.split(service["Service"]["ExecStart"])[-1] == "run"
+    assert (root / "opt/afterglow/waygate_agent.py").read_text() == (AGENT_DIR / "waygate_agent.py").read_text()
+    assert json.loads(state.read_text()) == {"timer_active": False, "timer_enabled": False, "service_active": True}
+    controls = [call for line in events.read_text().splitlines() if (call := json.loads(line))[0] == "systemctl"]
+    assert controls == [
+        ["systemctl", "disable", "--now", "afterglow-waygate-reconcile.timer"],
+        ["systemctl", "stop", "afterglow-waygate-reconcile.service"],
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", "--now", "afterglow-waygate-reconcile.service"],
+    ]
 
 
 def test_interface_section_includes_gateway_address_and_port(agent):
@@ -327,9 +374,11 @@ def report_runtime(agent, monkeypatch, tmp_path):
 
         def do_GET(self):
             requests.put((self.command, self.path, self.headers["Authorization"], None))
-            self.send_response(200)
+            status = response.get("desired_status", 200)
+            self.send_response(status)
             self.end_headers()
-            self.wfile.write(json.dumps(response["desired"]).encode())
+            if status == 200:
+                self.wfile.write(json.dumps(response["desired"]).encode())
 
         def log_message(self, *args):
             pass
@@ -396,22 +445,84 @@ def test_report_distinguishes_failed_dump_from_no_peers(agent, report_runtime, m
     _, requests, _, _ = report_runtime
     monkeypatch.setenv("WG_EXIT", "1")
     assert agent.cmd_report(agent.load_config()) == 1
+    body = requests.get_nowait()[3]
+    # A failed read is reported as diagnostics, never as an observed empty peer set.
+    assert body["peers"] == []
+    assert body["diagnostics"] == {"wg_interface_up": False, "error": "wg_show_failed"}
     assert requests.empty()
 
     monkeypatch.setenv("WG_EXIT", "0")
     assert agent.cmd_report(agent.load_config()) == 0
-    assert requests.get_nowait()[3]["peers"] == []
+    body = requests.get_nowait()[3]
+    assert body["peers"] == []
+    assert body["diagnostics"] == {"wg_interface_up": True}
 
 
 @pytest.mark.parametrize("error", [FileNotFoundError(), subprocess.TimeoutExpired("wg", 5)])
-def test_report_skips_post_when_wg_cannot_run(agent, report_runtime, monkeypatch, error):
-    _, requests, _, _ = report_runtime
+def test_report_posts_diagnostics_when_wg_cannot_run(agent, report_runtime, monkeypatch, error):
+    cfg, requests, _, _ = report_runtime
 
     def fail(*args, **kwargs):
         raise error
 
     monkeypatch.setattr(agent.subprocess, "run", fail)
     assert agent.cmd_report(agent.load_config()) == 1
+    method, path, bearer, body = requests.get_nowait()
+    assert (method, path, bearer) == ("POST", "/status", "Bearer " + cfg["bootstrap_token"])
+    assert body["diagnostics"] == {"wg_interface_up": False, "error": "wg_show_failed"}
+    assert requests.empty()
+
+
+@pytest.mark.parametrize(
+    "desired_status,category", [(401, "desired_state_unauthorized"), (403, "desired_state_unauthorized"), (503, "desired_state_unavailable")]
+)
+def test_failed_reconcile_is_reported_as_category_only(agent, report_runtime, desired_status, category):
+    cfg, requests, response, _ = report_runtime
+    response["desired_status"] = desired_status
+    assert agent.cmd_reconcile(agent.load_config()) == 0
+    assert agent.cmd_report(agent.load_config()) == 0
+    assert requests.get_nowait()[0:2] == ("GET", "/desired-state")
+    body = requests.get_nowait()[3]
+    assert body["diagnostics"] == {"wg_interface_up": True, "reconcile_ok": False, "error": category}
+    assert cfg["bootstrap_token"] not in json.dumps(body["diagnostics"])
+
+
+def test_wg_sync_failure_is_reported_until_a_later_reconcile_succeeds(agent, report_runtime, monkeypatch, tmp_path):
+    _, requests, _, _ = report_runtime
+    private = tmp_path / "privatekey"
+    private.write_text("private-key\n")
+    monkeypatch.setattr(agent, "PRIVATE_KEY_PATH", str(private))
+    monkeypatch.setattr(agent, "WG_CONF", str(tmp_path / "wg0.conf"))
+    monkeypatch.setattr(agent, "apply_masquerade", lambda *args: None)
+    outcomes = iter([False, True])
+    monkeypatch.setattr(agent, "syncconf", lambda: next(outcomes))
+
+    reports = []
+    for _ in range(2):
+        agent.cmd_reconcile(agent.load_config())
+        agent.cmd_report(agent.load_config())
+        requests.get_nowait()
+        reports.append(requests.get_nowait()[3]["diagnostics"])
+    assert reports == [
+        {"wg_interface_up": True, "reconcile_ok": False, "error": "wg_sync_failed"},
+        {"wg_interface_up": True, "reconcile_ok": True},
+    ]
+
+
+def test_run_reports_reconcile_exception_category(agent, report_runtime, monkeypatch, tmp_path):
+    _, requests, _, _ = report_runtime
+    # Missing private key raises inside reconcile; the run loop must still report.
+    monkeypatch.setattr(agent, "PRIVATE_KEY_PATH", str(tmp_path / "missing-privatekey"))
+    clock = SimpleNamespace(now=0.0)
+
+    def stop(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=stop))
+    assert agent.main(["run"]) == 0
+    assert requests.get_nowait()[0:2] == ("GET", "/desired-state")
+    body = requests.get_nowait()[3]
+    assert body["diagnostics"] == {"wg_interface_up": True, "reconcile_ok": False, "error": "reconcile_failed"}
     assert requests.empty()
 
 
@@ -472,9 +583,12 @@ def test_installed_agent_runs_both_jobs_in_both_image_modes(report_runtime, tmp_
         path.chmod(int(entry["permissions"], 8))
 
     commands = [shlex.split(command) for command in userdata["runcmd"]]
+    timer_stop = commands.index(["systemctl", "disable", "--now", "afterglow-waygate-reconcile.timer", "||", "true"])
+    service_stop = commands.index(["systemctl", "stop", "afterglow-waygate-reconcile.service", "||", "true"])
+    reload = commands.index(["systemctl", "daemon-reload"])
     registration = commands.index(["/usr/bin/python3", "/opt/afterglow/waygate_agent.py", "register"])
     activation = commands.index(["systemctl", "enable", "--now", "afterglow-waygate-reconcile.service"])
-    assert registration < commands.index(["systemctl", "daemon-reload"]) < activation
+    assert timer_stop < service_stop < reload < registration < activation
     units = root / "etc/systemd/system"
     assert {unit.name for unit in units.iterdir()} == {"afterglow-waygate-reconcile.service"}
     service = configparser.ConfigParser()

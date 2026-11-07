@@ -4,7 +4,9 @@
 A single long-lived process serializes 15-second desired-state reconciliation with
 configurable 1–60-second status reports (one second by default). It reloads the
 root-only config for every operation so reporting follows durable bearer rotation.
-Failed WireGuard reads never replace the last report with an empty peer list.
+Failed WireGuard reads never replace the last report with an empty peer list: the
+report then carries only `diagnostics` (wg_interface_up=false) so Waygate can still
+explain the gateway. Diagnostics hold booleans and error categories, never bodies.
 Stdlib-only and Python 3.10 compatible.
 """
 
@@ -27,6 +29,8 @@ PUBLIC_KEY_PATH = "/etc/wireguard/publickey"
 NAT_CHAIN = "WAYGATE-NAT"
 LOG = "/var/log/waygate-agent.log"
 _UTC = timezone.utc  # noqa: UP017 - gateway images may run Python 3.10.
+# Outcome of the latest reconcile in this process; reported as diagnostics.
+_RECONCILE = {"ok": None, "error": None}
 
 
 def _sync_config_directory(path) -> None:
@@ -165,11 +169,11 @@ def write_wg_conf(cfg: dict, private_key: str, desired: dict) -> None:
         f.write("\n".join(lines))
 
 
-def syncconf() -> None:
+def syncconf() -> bool:
     strip = subprocess.run(["wg-quick", "strip", WG_IFACE], capture_output=True, text=True, check=False)
     if strip.returncode != 0:
         log(f"wg-quick strip 실패: {strip.stderr.strip()}")
-        return
+        return False
     sync = subprocess.run(
         ["wg", "syncconf", WG_IFACE, "/dev/stdin"],
         input=strip.stdout,
@@ -179,16 +183,18 @@ def syncconf() -> None:
     )
     if sync.returncode != 0:
         log(f"wg syncconf 실패: {sync.stderr.strip()}")
+        return False
+    return True
 
 
 def collect_status() -> list[dict] | None:
     try:
         dump = subprocess.run(["wg", "show", WG_IFACE, "dump"], capture_output=True, text=True, check=False, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
-        log("wg show failed; skipping status report")
+        log("wg show failed; reporting diagnostics only")
         return None
     if dump.returncode != 0:
-        log("wg show failed; skipping status report")
+        log("wg show failed; reporting diagnostics only")
         return None
     peers = []
     for i, line in enumerate(dump.stdout.strip().splitlines()):
@@ -306,21 +312,28 @@ def cmd_register(cfg: dict) -> int:
     return 0
 
 
+def _record_reconcile(ok: bool, error=None) -> None:
+    _RECONCILE.update(ok=ok, error=error)
+
+
 def cmd_reconcile(cfg: dict) -> int:
-    _, desired = http_request(cfg, cfg["desired_state_url"])
+    status, desired = http_request(cfg, cfg["desired_state_url"])
     if desired is not None:
         adopt_next_token(cfg, desired)
         with open(PRIVATE_KEY_PATH) as f:
             private = f.read().strip()
         write_wg_conf(cfg, private, desired)
-        syncconf()
+        synced = syncconf()
         nat_networks = desired.get("nat_networks", []) or []
         if nat_networks:
             bring_up_hotplug_nics()
         # Flush the chain even when empty, removing detached network rules.
         apply_masquerade(desired.get("tunnel_cidr", cfg["tunnel_cidr"]), nat_networks)
+        _record_reconcile(bool(synced), None if synced else "wg_sync_failed")
     else:
         log("desired-state 조회 실패 — 이번 주기 스킵")
+        unauthorized = status in (401, 403)
+        _record_reconcile(False, "desired_state_unauthorized" if unauthorized else "desired_state_unavailable")
     return 0
 
 
@@ -331,23 +344,34 @@ def report_interval(cfg: dict) -> int:
     return interval
 
 
+def diagnostics(wg_interface_up: bool) -> dict:
+    """Category-only self-check; never includes response bodies, keys or tokens."""
+    result = {"wg_interface_up": wg_interface_up}
+    if _RECONCILE["ok"] is not None:
+        result["reconcile_ok"] = _RECONCILE["ok"]
+    error = _RECONCILE["error"] if wg_interface_up else "wg_show_failed"
+    if error:
+        result["error"] = error
+    return result
+
+
 def cmd_report(cfg: dict) -> int:
     interval = report_interval(cfg)
     peers = collect_status()
-    if peers is None:
-        return 1
     status, _ = http_request(
         cfg,
         cfg["status_url"],
         "POST",
         {
-            "peers": peers,
+            # wg_interface_up=false tells Waygate this is not an empty peer set.
+            "peers": peers or [],
             "reported_at": datetime.now(_UTC).isoformat(),
             "agent_source": agent_source(),
             "report_interval_seconds": interval,
+            "diagnostics": diagnostics(peers is not None),
         },
     )
-    return 0 if status in (200, 204) else 1
+    return 0 if peers is not None and status in (200, 204) else 1
 
 
 def cmd_run() -> int:
@@ -361,6 +385,7 @@ def cmd_run() -> int:
                     cmd_reconcile(load_config())
                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
                     log(f"reconcile failed ({type(exc).__name__})")
+                    _record_reconcile(False, "reconcile_failed")
                 next_reconcile = time.monotonic() + 15
 
             if time.monotonic() >= next_report:

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — agent diagnostics (planned 0.3.8; no version bump, not published/deployed)
+
+### 한국어
+- **변경/수정:** prebuilt 모드도 cloud-init에서 현재 agent script/unit을 설치하고 legacy timer를 disable/stop/제거, 기존 service stop, daemon-reload 후 `Type=simple` service를 `enable --now`한다. 오래된 image(예: 0.1.4의 oneshot agent가 register 직후 한 번만 실행되고 polling을 멈춘 사례)가 agent를 죽은 상태로 남기지 않는다. Package 설치는 계속 생략한다.
+- **추가:** `GET /v1/servers/{server_id}/diagnostics`(`waygate:server:get`)가 Waygate 수신 시각 기반 마지막 register/desired-state/status, 기대 client/attachment 수, verdict(`ok`/`never_connected`/`not_polling`/`not_reporting`/`peer_mismatch`)와 hint code를 반환한다. Telemetry는 Valkey에 14일 TTL로 비차단 best-effort 기록하며 agent endpoint를 실패시키거나 늦추지 않는다. Agent는 `wg show`/reconcile 실패 시에도 category-only `diagnostics`를 보고하고, `wg_interface_up=false` 보고는 cached peer를 덮어쓰지 않는다.
+- **폐기/제거/이행:** 없음. Schema/migration/dependency 변경 없음. 이미 생성된 VM은 수정되지 않으므로 재생성이 필요하다.
+
+### English
+- **Changes/fixes:** Prebuilt cloud-init now also writes the current agent script/units, disables/stops/removes the legacy timer, stops the prior service, reloads systemd and `enable --now`s the `Type=simple` agent, so a stale image (e.g. the 0.1.4 oneshot agent that ran once after register) cannot leave the agent dead. Packages remain skipped.
+- **Added:** `GET /v1/servers/{server_id}/diagnostics` (`waygate:server:get`) with server-observed last register/desired-state/status times, expected clients/attachments, verdict and stable hint codes. Telemetry is a non-blocking best-effort Valkey hash (14-day TTL) that never fails or slows agent endpoints. The agent posts category-only `diagnostics` even when `wg show` or reconcile fails; `wg_interface_up=false` reports never overwrite cached peers.
+- **Deprecated/removed/upgrade:** None. No schema, migration or dependency change. Existing VMs are not modified and must be recreated.
+
 ## 0.3.7 — candidate prepared 2026-11-04 UTC (not published/deployed)
 
 ### 한국어

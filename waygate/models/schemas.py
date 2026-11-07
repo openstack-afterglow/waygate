@@ -409,6 +409,16 @@ class WaygateAgentPeerState(BaseModel):
         return v
 
 
+class WaygateAgentDiagnostics(BaseModel):
+    """Small agent self-check carried by status reports; categories only, never bodies or secrets."""
+
+    model_config = {"extra": "forbid"}
+
+    reconcile_ok: bool | None = Field(default=None, strict=True)
+    wg_interface_up: bool | None = Field(default=None, strict=True)
+    error: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,47}\z")
+
+
 class WaygateAgentStatusReport(BaseModel):
     """에이전트가 주기적으로 POST하는 wg show 상태."""
 
@@ -416,6 +426,50 @@ class WaygateAgentStatusReport(BaseModel):
     reported_at: str | None = None
     agent_source: Literal["cloud-init", "prebuilt"] | None = None
     report_interval_seconds: int | None = Field(default=None, ge=1, le=60, strict=True)
+    # wg_interface_up=false means `peers` is unknown, not an empty peer set.
+    diagnostics: WaygateAgentDiagnostics | None = None
+
+    @property
+    def peers_observed(self) -> bool:
+        return self.diagnostics is None or self.diagnostics.wg_interface_up is not False
+
+
+WaygateDiagnosticsVerdict = Literal["ok", "never_connected", "not_polling", "not_reporting", "peer_mismatch"]
+WaygateDiagnosticsHint = Literal[
+    "agent_not_polling", "agent_never_reported", "agent_status_stale", "peers_mismatch", "image_agent_outdated"
+]
+
+
+class WaygateServerDiagnosticsAgent(BaseModel):
+    install_mode: Literal["cloud-init", "prebuilt"]
+    image_id: str | None = None
+    source: str | None = None
+    report_interval_seconds: int | None = None
+
+
+class WaygateServerDiagnosticsStatus(BaseModel):
+    peers: int
+    reported_at: str
+    diagnostics: WaygateAgentDiagnostics | None = None
+
+
+class WaygateServerDiagnosticsExpected(BaseModel):
+    enabled_clients: int
+    attachments: int
+
+
+class WaygateServerDiagnostics(BaseModel):
+    """Server-observed agent interaction summary; every time is a Waygate receive time."""
+
+    verdict: WaygateDiagnosticsVerdict
+    checked_at: str
+    agent: WaygateServerDiagnosticsAgent
+    last_register_at: str | None = None
+    last_desired_state_at: str | None = None
+    last_status_at: str | None = None
+    last_status: WaygateServerDiagnosticsStatus | None = None
+    expected: WaygateServerDiagnosticsExpected
+    hints: list[WaygateDiagnosticsHint] = Field(default_factory=list)
 
 
 class WaygateAgentDesiredStatePeer(BaseModel):

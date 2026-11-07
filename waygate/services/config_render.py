@@ -178,7 +178,11 @@ def render_agent_userdata(
     bootstrap_token: str,
     install_packages: bool,
 ) -> str:
-    """Render Nova's base64 cloud-init payload for stock or prebuilt gateway images."""
+    """Render Nova's base64 cloud-init payload for stock or prebuilt gateway images.
+
+    Both modes write this release's agent script/units and replace any legacy
+    timer/oneshot agent; prebuilt mode only skips package installation.
+    """
     _validate_cloudinit_inputs(
         server_name, register_url, desired_state_url, status_url, bootstrap_token, listen_port, tunnel_cidr
     )

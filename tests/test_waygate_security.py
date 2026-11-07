@@ -256,15 +256,30 @@ class TestCloudInitRenderQuoting:
             assert written[target]["content"] == agent_asset(name)
         self._assert_no_template_markers(document)
 
-    def test_prebuilt_mode_writes_only_agent_config(self):
+    def test_prebuilt_mode_skips_packages_but_replaces_image_agent(self):
+        from waygate.services.config_render import AGENT_FILES, agent_asset
+
         cloud_init = self._render()
         prebuilt = self._render(install_packages=False)
+        written = {entry["path"]: entry for entry in prebuilt["write_files"]}
 
         assert "packages" not in prebuilt
         assert "package_update" not in prebuilt
-        assert [entry["path"] for entry in prebuilt["write_files"]] == [_AGENT_CONFIG_PATH]
+        # A stale image agent (e.g. pre-0.3.0 oneshot+timer) is always replaced.
+        assert set(written) == {_AGENT_CONFIG_PATH} | {target for _, target, _ in AGENT_FILES}
+        for name, target, mode in AGENT_FILES:
+            assert written[target]["permissions"] == mode
+            assert written[target]["content"] == agent_asset(name)
         assert prebuilt["runcmd"] == cloud_init["runcmd"]
-        assert json.loads(prebuilt["write_files"][0]["content"])["agent_install_mode"] == "prebuilt"
+        assert prebuilt["runcmd"][:4] == [
+            "systemctl disable --now afterglow-waygate-reconcile.timer || true",
+            "rm -f /etc/systemd/system/afterglow-waygate-reconcile.timer"
+            " /etc/systemd/system/timers.target.wants/afterglow-waygate-reconcile.timer",
+            "systemctl stop afterglow-waygate-reconcile.service || true",
+            "systemctl daemon-reload",
+        ]
+        assert prebuilt["runcmd"][-1] == "systemctl enable --now afterglow-waygate-reconcile.service"
+        assert json.loads(written[_AGENT_CONFIG_PATH]["content"])["agent_install_mode"] == "prebuilt"
         self._assert_no_template_markers(prebuilt)
 
     def test_rejects_bad_tunnel_cidr(self):

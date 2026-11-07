@@ -7,21 +7,24 @@ packages:
   - {{ package }}
 {% endfor %}
 {% endif %}
+# The agent script and units are always written, also for prebuilt images: a
+# stale image must never keep an older (oneshot/timer) agent alive.
 write_files:
   - path: /etc/waygate/agent.json
     permissions: "0600"
     content: |
       {{ agent_config_json }}
-{% if install_packages %}
 {% for file in agent_files %}
   - path: {{ file.target }}
     permissions: "{{ file.mode }}"
     content: |
 {{ file.content | indent(6, first=True) }}
 {% endfor %}
-{% endif %}
 runcmd:
+  - systemctl disable --now afterglow-waygate-reconcile.timer || true
+  - rm -f /etc/systemd/system/afterglow-waygate-reconcile.timer /etc/systemd/system/timers.target.wants/afterglow-waygate-reconcile.timer
+  - systemctl stop afterglow-waygate-reconcile.service || true
+  - systemctl daemon-reload
   - sysctl --system
   - /usr/bin/python3 /opt/afterglow/waygate_agent.py register
-  - systemctl daemon-reload
   - systemctl enable --now afterglow-waygate-reconcile.service

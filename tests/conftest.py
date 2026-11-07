@@ -30,8 +30,19 @@ def _reset_rate_limiter():
 
 
 @pytest.fixture(autouse=True)
+def _reset_agent_telemetry():
+    from waygate.services import agent_telemetry
+
+    agent_telemetry._last_write.clear()
+    yield
+    agent_telemetry._last_write.clear()
+
+
+
+@pytest.fixture(autouse=True)
 async def _fake_redis(monkeypatch):
     from waygate import cache, crypto
+    from waygate.services import agent_telemetry
 
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(cache, "_client", fake)
@@ -43,6 +54,7 @@ async def _fake_redis(monkeypatch):
     try:
         yield fake
     finally:
+        await agent_telemetry.drain_pending()
         closing = fake.close()
         if inspect.isawaitable(closing):
             await closing

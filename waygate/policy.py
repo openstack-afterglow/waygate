@@ -64,6 +64,10 @@ _OPERATIONS = {
     "waygate:resource-policy:catalog": ("GET", "/v1/admin/resource-policies/catalog/{policy_key}"),
     "waygate:resource-policy:update": ("PUT", "/v1/admin/resource-policies/{policy_key}"),
 }
+# Additional read routes authorized by an existing action (documentation only).
+_ADDITIONAL_OPERATIONS = {
+    "waygate:server:get": (("GET", "/v1/servers/{server_id}/diagnostics"),),
+}
 SYSTEM_ACTIONS = frozenset(action for action in _OPERATIONS if action.startswith("waygate:resource-policy:"))
 ACTION_NAMES = frozenset(_OPERATIONS)
 
@@ -78,7 +82,11 @@ def list_rules() -> list[policy.RuleDefault]:
     return [
         policy.DocumentedRuleDefault(
             name=action, check_str=checks[action], description=f"Authorize {action}; native ownership and credential ceilings also apply.",
-            operations=[{"method": method, "path": path}], scope_types=["system"] if action in SYSTEM_ACTIONS else ["project"],
+            operations=[
+                {"method": op_method, "path": op_path}
+                for op_method, op_path in ((method, path), *_ADDITIONAL_OPERATIONS.get(action, ()))
+            ],
+            scope_types=["system"] if action in SYSTEM_ACTIONS else ["project"],
         )
         for action, (method, path) in _OPERATIONS.items()
     ]

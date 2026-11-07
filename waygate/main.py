@@ -19,6 +19,7 @@ from waygate.db import close_db, init_db
 from waygate.models.schemas import HealthResponse, RootDiscoveryResponse, VersionDiscoveryResponse
 from waygate.observability import SafeAccessLog, configure_logging
 from waygate.rate_limit import limiter
+from waygate.services import agent_telemetry
 
 _logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        # Writes are individually bounded by a short timeout.
+        await agent_telemetry.drain_pending()
         await close_cache()
         await close_db()
         _logger.info("api stage=shutdown status=stopped")

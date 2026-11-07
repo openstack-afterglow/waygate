@@ -11,10 +11,11 @@ from waygate.db import is_db_available
 from waygate.models.schemas import (
     WaygateServerCreateRequest,
     WaygateServerDeleteResponse,
+    WaygateServerDiagnostics,
     WaygateServerInfo,
     WaygateServerUpdateRequest,
 )
-from waygate.services import execution, waygate_agent_auth, waygate_db, waygate_jobs
+from waygate.services import execution, waygate_agent_auth, waygate_agent_telemetry, waygate_db, waygate_jobs
 from waygate.services.store import WaygateServerInactiveError
 
 router = APIRouter()
@@ -114,6 +115,30 @@ async def get_waygate_server(server_id: str, token_info: dict = Depends(require_
         # 정보 노출 방지 — 존재하지 않음/타 프로젝트 소유 모두 동일 404
         raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
     return await _merge_status(server)
+
+
+@router.get("/{server_id}/diagnostics", response_model=WaygateServerDiagnostics)
+async def get_waygate_server_diagnostics(
+    server_id: str, token_info: dict = Depends(require_action("waygate:server:get"))
+):
+    """Explain agent connectivity from Waygate-observed register/poll/report receive times."""
+    _require_db()
+    server = await waygate_db.get_server(token_info["project_id"], server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Waygate 서버를 찾을 수 없습니다")
+    try:
+        telemetry = await waygate_agent_telemetry.get_telemetry(server_id)
+    except waygate_agent_telemetry.TelemetryUnavailable:
+        raise HTTPException(status_code=503, detail="Agent telemetry storage unavailable") from None
+    clients = await waygate_db.list_all_active_clients(server_id)
+    attachments = await waygate_db.list_active_attachment_cidrs(server_id)
+    return waygate_agent_telemetry.evaluate(
+        server,
+        telemetry,
+        enabled_clients=sum(1 for client in clients if client.get("enabled")),
+        attachments=len(attachments),
+        now=waygate_agent_telemetry.now(),
+    )
 
 
 @router.patch("/{server_id}", response_model=WaygateServerInfo)
