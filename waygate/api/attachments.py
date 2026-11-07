@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from waygate.auth import require_action
 from waygate.db import is_db_available
-from waygate.models.schemas import WaygateNetworkAttachCreateRequest, WaygateNetworkAttachmentInfo
+from waygate.models.schemas import (
+    WaygateNetworkAttachCreateRequest,
+    WaygateNetworkAttachmentInfo,
+    WaygateNetworkAttachmentUpdateRequest,
+)
 from waygate.services import execution, waygate_db, waygate_network
 from waygate.services.network import WaygateNetworkError
 
@@ -42,14 +46,23 @@ async def attach_waygate_network(
     body: WaygateNetworkAttachCreateRequest,
     token_info: dict = Depends(require_action("waygate:network:attach")),
 ):
-    """Waygate 서버에 테넌트 네트워크를 추가 연결(멀티 NIC + SNAT). 서버가 ACTIVE 여야 한다."""
+    """Waygate 서버에 네트워크 인터페이스(멀티 NIC + SNAT)를 연결한다. 서버가 ACTIVE 여야 한다.
+
+    `allowed_ips`는 클라이언트 AllowedIPs 로 광고할 별도 라우팅 설정이다(기본 []: subnet CIDR 자동 광고 없음).
+    """
     _require_db()
     project_id = token_info["project_id"]
     server = await _get_owned_server(project_id, server_id)
     try:
         async with execution.admitted_operation(token_info, server_id, "attach") as (_grant, conn):
             att = await waygate_network.attach_network(
-                project_id, server, body.network_id, body.subnet_id, body.nat_mode, conn=conn
+                project_id,
+                server,
+                body.network_id,
+                body.subnet_id,
+                body.nat_mode,
+                conn=conn,
+                allowed_ips=body.allowed_ips,
             )
     except execution.ExecutionDenied as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from None
@@ -67,6 +80,24 @@ async def list_waygate_networks(server_id: str, token_info: dict = Depends(requi
     await _get_owned_server(project_id, server_id)
     atts = await waygate_db.list_attachments(server_id, project_id)
     return [_to_info(a) for a in atts]
+
+
+@router.patch("/{server_id}/networks/{attachment_id}", response_model=WaygateNetworkAttachmentInfo)
+async def update_waygate_network_routes(
+    server_id: str,
+    attachment_id: int,
+    body: WaygateNetworkAttachmentUpdateRequest,
+    token_info: dict = Depends(require_action("waygate:network:update")),
+):
+    """Replace one ACTIVE attachment's client routes (allowed_ips); interface and NAT CIDR are unchanged."""
+    _require_db()
+    project_id = token_info["project_id"]
+    server = await _get_owned_server(project_id, server_id)
+    try:
+        att = await waygate_network.update_attachment_routes(project_id, server, attachment_id, body.allowed_ips)
+    except WaygateNetworkError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+    return _to_info(att)
 
 
 @router.delete("/{server_id}/networks/{attachment_id}", status_code=204)

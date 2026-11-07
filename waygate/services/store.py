@@ -60,6 +60,8 @@ def _server_to_dict(s: WaygateServer) -> dict:
         "key_name": getattr(s, "key_name", None),
         "resource_policy_snapshot": getattr(s, "resource_policy_snapshot", None),
         "agent_install_mode": s.agent_install_mode,
+        "expected_clients": getattr(s, "expected_clients", None),
+        "flavor_tier": getattr(s, "flavor_tier", None),
         "agent_token_issued_at": s.agent_token_issued_at.isoformat() if s.agent_token_issued_at else None,
         "agent_token_rotation_pending": s.agent_token_next_encrypted is not None,
         "server_public_key": getattr(s, "server_public_key", None),
@@ -125,6 +127,8 @@ def add_server_record(session, project_id: str, server_id: str, data: dict) -> W
         floating_network_id=data.get("floating_network_id") or None,
         resource_policy_snapshot=data.get("resource_policy_snapshot") or None,
         agent_install_mode=data.get("agent_install_mode") or "cloud-init",
+        expected_clients=data.get("expected_clients"),
+        flavor_tier=data.get("flavor_tier") or None,
         listen_port=int(data.get("listen_port") or 51820),
         tunnel_cidr=data.get("tunnel_cidr") or "10.8.0.0/24",
         dns=data.get("dns") or None,
@@ -608,6 +612,13 @@ async def update_client(server_id: str, project_id: str, client_id: str, **field
 # ---------------------------------------------------------------------------
 
 
+def _attachment_routes(a: WaygateNetworkAttachment) -> list[str]:
+    """Stored client routes; NULL (row written by a pre-008 process) keeps legacy [cidr] routing."""
+    if a.allowed_ips is not None:
+        return list(a.allowed_ips)
+    return [a.cidr] if a.cidr else []
+
+
 def _attachment_to_dict(a: WaygateNetworkAttachment) -> dict:
     return {
         "id": a.id,
@@ -617,6 +628,7 @@ def _attachment_to_dict(a: WaygateNetworkAttachment) -> dict:
         "subnet_id": a.subnet_id,
         "port_id": a.port_id,
         "cidr": a.cidr,
+        "allowed_ips": _attachment_routes(a),
         "nat_mode": a.nat_mode,
         "status": a.status,
         "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -643,6 +655,7 @@ async def create_attachment_record(server_id: str, project_id: str, data: dict) 
             subnet_id=data.get("subnet_id") or None,
             port_id=data.get("port_id") or None,
             cidr=data.get("cidr") or None,
+            allowed_ips=list(data.get("allowed_ips") or []),
             nat_mode=data.get("nat_mode") or "snat",
             status=data.get("status") or "CREATING",
         )
@@ -693,6 +706,31 @@ async def list_active_attachment_cidrs(server_id: str) -> list[str]:
         return [c for c in result.scalars().all() if c]
 
 
+async def list_active_attachment_routes(server_id: str) -> list[str]:
+    """Client-config rendering: ordered, deduplicated union of ACTIVE attachments' allowed_ips.
+
+    Uses no project filter (the caller already proved server ownership). The NAT CIDR is not a
+    route source; legacy NULL rows keep their [cidr] routing via _attachment_routes.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = (
+            select(WaygateNetworkAttachment)
+            .where(
+                WaygateNetworkAttachment.server_id == server_id,
+                WaygateNetworkAttachment.status == "ACTIVE",
+            )
+            .order_by(WaygateNetworkAttachment.created_at.asc(), WaygateNetworkAttachment.id.asc())
+        )
+        result = await session.execute(stmt)
+        routes: list[str] = []
+        for attachment in result.scalars().all():
+            for route in _attachment_routes(attachment):
+                if route and route not in routes:
+                    routes.append(route)
+        return routes
+
+
 async def get_attachment(server_id: str, project_id: str, attachment_id: int) -> dict | None:
     factory = get_session_factory()
     async with factory() as session:
@@ -721,6 +759,44 @@ async def update_attachment(attachment_id: int, **fields) -> None:
                 setattr(att, k, v)
         att.updated_at = datetime.now(UTC)
         await session.commit()
+
+
+async def update_attachment_routes(
+    server_id: str, project_id: str, attachment_id: int, allowed_ips: list[str]
+) -> dict | None:
+    """Replace one ACTIVE attachment's client routes under the live server row lock.
+
+    Returns None when the attachment is absent for this project; raises WaygateServerInactiveError
+    when the server or attachment is not ACTIVE.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        server = (
+            await session.execute(
+                select(WaygateServer)
+                .where(WaygateServer.id == server_id, WaygateServer.project_id == project_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if server is None or server.deleted_at is not None:
+            return None
+        att = (
+            await session.execute(
+                select(WaygateNetworkAttachment).where(
+                    WaygateNetworkAttachment.id == attachment_id,
+                    WaygateNetworkAttachment.server_id == server_id,
+                    WaygateNetworkAttachment.project_id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if att is None:
+            return None
+        if server.status != "ACTIVE" or att.status != "ACTIVE":
+            raise WaygateServerInactiveError("Waygate server or attachment is not active")
+        att.allowed_ips = list(allowed_ips)
+        att.updated_at = datetime.now(UTC)
+        await session.commit()
+        return _attachment_to_dict(att)
 
 
 async def delete_attachment(server_id: str, project_id: str, attachment_id: int) -> dict | None:

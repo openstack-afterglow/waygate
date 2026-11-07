@@ -1,6 +1,7 @@
 """Checksum-verified migration manifest rejects changed or unlisted SQL."""
 
 import hashlib
+import json
 import sqlite3
 from contextlib import closing
 
@@ -89,9 +90,52 @@ def test_native_migration_manifest_includes_additive_owner_upgrade():
     assert [entry.logical_id for entry in migrate.load_manifest()] == [
         "001_baseline", "002_agent_install_mode_and_token_rotation", "003_client_tunnel_settings",
         "004_server_client_defaults", "005_client_owner", "006_execution_grants", "007_admin_execution",
+        "008_gateway_sizing_and_attachment_routes",
     ]
     manifest = {entry.logical_id: entry for entry in migrate.load_manifest()}
     assert manifest["007_admin_execution"].sha256 == "2dd4d14afa2a5a50aa853d0e4101dc044f5d7858bc57889245d0ebbe1a9f47fb"
+
+
+def test_attachment_routes_migration_backfills_existing_client_routing(tmp_path):
+    migration = next(
+        entry for entry in migrate.load_manifest() if entry.logical_id == "008_gateway_sizing_and_attachment_routes"
+    )
+    path = tmp_path / "legacy-routes.sqlite"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE waygate_servers (id TEXT PRIMARY KEY, flavor_id TEXT, tunnel_cidr TEXT NOT NULL);
+            CREATE TABLE waygate_network_attachments (
+                id INTEGER PRIMARY KEY, server_id TEXT NOT NULL, network_id TEXT NOT NULL,
+                cidr TEXT, nat_mode TEXT NOT NULL, status TEXT NOT NULL
+            );
+            INSERT INTO waygate_servers VALUES ('old', 'flavor-1', '10.8.0.0/24');
+            INSERT INTO waygate_network_attachments VALUES
+                (1, 'old', 'net-a', '192.168.10.0/24', 'snat', 'ACTIVE'),
+                (2, 'old', 'net-b', '172.16.0.0/20', 'snat', 'ERROR'),
+                (3, 'old', 'net-c', NULL, 'snat', 'CREATING');
+            """
+        )
+        before = connection.execute("SELECT * FROM waygate_network_attachments ORDER BY id").fetchall()
+        for statement in migrate._statements(migrate.MIGRATIONS / migration.relative_path):
+            connection.execute(statement.replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN"))
+        connection.commit()
+    with closing(sqlite3.connect(path)) as connection:
+        rows = connection.execute("SELECT * FROM waygate_network_attachments ORDER BY id").fetchall()
+        # Existing columns are untouched; each attachment now advertises exactly its former CIDR.
+        assert [row[:-1] for row in rows] == before
+        assert [json.loads(row[-1]) for row in rows] == [["192.168.10.0/24"], ["172.16.0.0/20"], []]
+        assert connection.execute(
+            "SELECT flavor_id, expected_clients, flavor_tier FROM waygate_servers"
+        ).fetchall() == [("flavor-1", None, None)]
+
+    # The ORM read path renders the same client routes the pre-008 renderer derived from cidr.
+    from waygate.models.orm import WaygateNetworkAttachment
+    from waygate.services.store import _attachment_routes
+
+    for stored, cidr in ((["192.168.10.0/24"], "192.168.10.0/24"), (None, "192.168.10.0/24"), (None, None)):
+        attachment = WaygateNetworkAttachment(cidr=cidr, allowed_ips=stored)
+        assert _attachment_routes(attachment) == ([cidr] if cidr else [])
 
 
 def test_owner_upgrade_preserves_credentials_and_leaves_legacy_clients_unassigned(tmp_path):

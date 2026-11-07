@@ -85,19 +85,19 @@ def render_client_conf(
     endpoint_ip: str,
     listen_port: int,
     allowed_ips: list[str],
-    nat_cidrs: list[str] | None = None,
+    attachment_routes: list[str] | None = None,
     mtu: int | None = None,
     persistent_keepalive: int = 25,
     preshared_key: str | None = None,
 ) -> str:
     """클라이언트용 WireGuard `.conf` 파일 텍스트를 렌더한다.
 
-    AllowedIPs = 터널 서브넷(+ 클라이언트 지정 allowed_ips) + 연결된 테넌트 네트워크 CIDR(nat_cidrs).
-    nat_cidrs 를 포함해야 클라이언트가 그 네트워크로 향하는 트래픽을 터널로 라우팅한다(Phase 2 split-tunnel).
+    AllowedIPs = 터널 서브넷(+ 클라이언트 지정 allowed_ips) + ACTIVE network attachment 들의 `allowed_ips` 합집합
+    (attachment_routes). Attachment 의 물리 subnet CIDR(NAT 대상)은 더 이상 자동으로 광고하지 않는다.
     순서를 보존하며 중복은 제거한다.
     """
     merged: list[str] = []
-    for cidr in [*allowed_ips, *(nat_cidrs or [])]:
+    for cidr in [*allowed_ips, *(attachment_routes or [])]:
         if cidr and cidr not in merged:
             merged.append(cidr)
 

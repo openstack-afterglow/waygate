@@ -259,6 +259,13 @@ async def test_live_gateway_full_lifecycle():
             if subnet_id:
                 assert attachment["subnet_id"] == subnet_id
             cidr = attachment["cidr"]
+            # Attaching is only the interface; client routing is a separate per-attachment setting.
+            assert attachment["allowed_ips"] == []
+            response = await client.patch(
+                f"/v1/servers/{server_id}/networks/{attachment_id}", json={"allowed_ips": [cidr]}
+            )
+            response.raise_for_status()
+            assert response.json()["allowed_ips"] == [cidr]
             response = await client.get(f"/v1/servers/{server_id}/networks")
             response.raise_for_status()
             assert any(item["id"] == attachment_id for item in response.json())

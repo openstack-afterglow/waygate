@@ -29,7 +29,7 @@ CAPABILITY_ACTIONS = {
     "waygate-clients_admin": ("waygate:client:set-enabled", "waygate:client:delete"),
     "waygate-gateways_editor": ("waygate:server:create", "waygate:server:update"),
     "waygate-gateways_admin": ("waygate:server:delete", "waygate:server:rotate-agent-token"),
-    "waygate-routing_admin": ("waygate:network:attach", "waygate:network:detach"),
+    "waygate-routing_admin": ("waygate:network:attach", "waygate:network:update", "waygate:network:detach"),
 }
 
 _PROJECT_READ_ROLES = ("reader", "member", "manager", "admin")
@@ -57,6 +57,7 @@ _OPERATIONS = {
     "waygate:client:download": ("GET", "/v1/servers/{server_id}/clients/{client_id}/config"),
     "waygate:network:list": ("GET", "/v1/servers/{server_id}/networks"),
     "waygate:network:attach": ("POST", "/v1/servers/{server_id}/networks"),
+    "waygate:network:update": ("PATCH", "/v1/servers/{server_id}/networks/{attachment_id}"),
     "waygate:network:detach": ("DELETE", "/v1/servers/{server_id}/networks/{attachment_id}"),
     "waygate:bundle:export": ("POST", "/v1/servers/{server_id}/export"),
     "waygate:bundle:import": ("POST", "/v1/servers/{server_id}/import"),

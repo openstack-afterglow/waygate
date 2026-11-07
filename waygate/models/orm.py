@@ -45,6 +45,9 @@ class WaygateServer(Base):
     key_name: Mapped[str | None] = mapped_column(VARCHAR(255))
     resource_policy_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     agent_install_mode: Mapped[str] = mapped_column(VARCHAR(16), nullable=False, default="cloud-init")
+    # Requested client count at create (NULL for older servers) and the applied flavor tier.
+    expected_clients: Mapped[int | None] = mapped_column(INT, nullable=True)
+    flavor_tier: Mapped[str | None] = mapped_column(VARCHAR(16), nullable=True)
 
     # 에이전트 제어채널 자격증명 — AES-256-GCM 암호화 저장(도메인 wg_agent_token).
     # Redis(휘발성)가 아니라 여기에 durable 하게 보관해, Redis eviction/재시작이나 이전
@@ -158,7 +161,10 @@ class WaygateNetworkAttachment(Base):
     network_id: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
     subnet_id: Mapped[str | None] = mapped_column(VARCHAR(64))
     port_id: Mapped[str | None] = mapped_column(VARCHAR(64))
-    cidr: Mapped[str | None] = mapped_column(VARCHAR(43))  # NAT 대상
+    cidr: Mapped[str | None] = mapped_column(VARCHAR(43))  # NAT 대상(물리 인터페이스 subnet)
+    # Client AllowedIPs advertised for this attachment, independent of the NAT CIDR.
+    # NULL only for rows written before migration 008 by an old process: read as [cidr].
+    allowed_ips: Mapped[list | None] = mapped_column(JSON, nullable=True)
     nat_mode: Mapped[str] = mapped_column(VARCHAR(16), nullable=False, default="snat")
     status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, default="CREATING")
 

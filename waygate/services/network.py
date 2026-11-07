@@ -2,7 +2,9 @@
 
 waygate VM 에 추가 테넌트 네트워크를 attach 해, VPN 클라이언트가 터널을 통해 그 네트워크
 내부 인스턴스에 접근하도록 한다. 실제 SNAT masquerade 는 VM 내부 에이전트가 desired-state 의
-nat_networks(CIDR 목록)를 받아 iptables 로 적용한다(templates/waygate_agent.yaml.j2).
+nat_networks(attachment CIDR 목록)를 받아 iptables 로 적용한다(templates/waygate_agent.yaml.j2).
+Attachment 는 물리 인터페이스만 의미하며, 클라이언트 AllowedIPs 라우팅은 attachment 별
+`allowed_ips` 설정이다(subnet CIDR 을 자동으로 광고하지 않는다).
 
 소유권 검증은 호출부(API 라우터)에서 _get_owned_server 로 이미 수행하고, 이 모듈은 서버 dict 를
 받아 OpenStack 작업 + DB 기록을 담당한다.
@@ -11,6 +13,7 @@ nat_networks(CIDR 목록)를 받아 iptables 로 적용한다(templates/waygate_
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 
 from waygate.services import neutron, nova, waygate_db
@@ -27,6 +30,28 @@ class WaygateNetworkError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
+
+
+def validate_attachment_routes(allowed_ips: list[str], tunnel_cidr: str) -> list[str]:
+    """Schema-canonical routes must not overlap the gateway tunnel subnet (422 otherwise)."""
+    tunnel = ipaddress.ip_network(tunnel_cidr, strict=False)
+    for route in allowed_ips:
+        network = ipaddress.ip_network(route, strict=False)
+        if network.version == tunnel.version and network.overlaps(tunnel):
+            raise WaygateNetworkError(422, f"allowed_ips {route} overlaps the Waygate tunnel subnet {tunnel}")
+    return list(allowed_ips)
+
+
+def _network_attachable(net, project_id: str) -> bool:
+    """Own tenant network, or a provider network shared with / external to every project.
+
+    Neutron already returned it to this caller's scoped connection; anything else stays 404.
+    """
+    if net is None:
+        return False
+    if getattr(net, "is_shared", False) is True or getattr(net, "is_router_external", False) is True:
+        return True
+    return getattr(net, "project_id", None) == project_id
 
 
 def _resolve_cidr(conn, network_id: str, subnet_id: str | None) -> tuple[str, str]:
@@ -49,13 +74,21 @@ def _resolve_cidr(conn, network_id: str, subnet_id: str | None) -> tuple[str, st
 
 
 async def attach_network(
-    project_id: str, server: dict, network_id: str, subnet_id: str | None, nat_mode: str, *, conn
+    project_id: str,
+    server: dict,
+    network_id: str,
+    subnet_id: str | None,
+    nat_mode: str,
+    *,
+    conn,
+    allowed_ips: list[str] | None = None,
 ) -> dict:
-    """서버에 테넌트 네트워크를 연결하고 attachment dict 를 반환한다."""
+    """서버에 네트워크 인터페이스를 연결하고 attachment dict 를 반환한다."""
     server_id = server["id"]
     vm_id = server.get("server_vm_id")
     if server.get("status") != "ACTIVE" or not vm_id:
         raise WaygateNetworkError(409, "Waygate 서버가 ACTIVE 상태가 아닙니다")
+    routes = validate_attachment_routes(allowed_ips or [], server["tunnel_cidr"])
 
     # 중복 연결 방지
     existing = await waygate_db.list_attachments(server_id, project_id)
@@ -63,12 +96,8 @@ async def attach_network(
         raise WaygateNetworkError(409, "이미 연결된 네트워크입니다")
 
     net = await asyncio.to_thread(conn.network.get_network, network_id)
-    # project_id 가 있는 테넌트 네트워크는 소유 프로젝트와 일치해야 한다.
-    # 엣지: shared/external 네트워크는 project_id 가 falsy 라 이 검사를 통과할 수 있으나,
-    # 그런 네트워크는 이미 이 프로젝트에서 조회·사용 가능한(의도적으로 공유된) 것이므로
-    # 자신의 게이트웨이 VM 에 붙이는 것은 교차 테넌트 데이터 접근이 아니다.
-    if net is None or (getattr(net, "project_id", None) and net.project_id != project_id):
-        # 존재하지 않음/타 프로젝트 소유 모두 동일 404 (정보 노출 방지)
+    if not _network_attachable(net, project_id):
+        # 존재하지 않음/타 프로젝트 소유(비공유) 모두 동일 404 (정보 노출 방지)
         raise WaygateNetworkError(404, "네트워크를 찾을 수 없습니다")
 
     resolved_subnet_id, cidr = await asyncio.to_thread(_resolve_cidr, conn, network_id, subnet_id)
@@ -81,6 +110,7 @@ async def attach_network(
                 "network_id": network_id,
                 "subnet_id": resolved_subnet_id,
                 "cidr": cidr,
+                "allowed_ips": routes,
                 "nat_mode": nat_mode,
                 "status": "CREATING",
             },
@@ -125,7 +155,9 @@ async def attach_network(
         raise WaygateNetworkError(500, "네트워크 인터페이스 연결에 실패했습니다") from e
 
     await waygate_db.update_attachment(att["id"], status="ACTIVE")
-    att.update({"status": "ACTIVE", "port_id": port_id, "cidr": cidr, "subnet_id": resolved_subnet_id})
+    att.update(
+        {"status": "ACTIVE", "port_id": port_id, "cidr": cidr, "subnet_id": resolved_subnet_id, "allowed_ips": routes}
+    )
     _logger.info(
         "waygate_network: server=%s network=%s subnet=%s attached (port=%s, cidr=%s)",
         server_id,
@@ -133,6 +165,21 @@ async def attach_network(
         resolved_subnet_id,
         port_id,
         cidr,
+    )
+    return att
+
+
+async def update_attachment_routes(project_id: str, server: dict, attachment_id: int, allowed_ips: list[str]) -> dict:
+    """Replace one ACTIVE attachment's client routes; no OpenStack call, NAT/interface unchanged."""
+    routes = validate_attachment_routes(allowed_ips, server["tunnel_cidr"])
+    try:
+        att = await waygate_db.update_attachment_routes(server["id"], project_id, attachment_id, routes)
+    except WaygateServerInactiveError as exc:
+        raise WaygateNetworkError(409, "Waygate 서버와 네트워크 연결이 모두 ACTIVE 상태여야 합니다") from exc
+    if att is None:
+        raise WaygateNetworkError(404, "네트워크 연결을 찾을 수 없습니다")
+    _logger.info(
+        "waygate_network: server=%s attachment=%s routes updated (count=%d)", server["id"], attachment_id, len(routes)
     )
     return att
 

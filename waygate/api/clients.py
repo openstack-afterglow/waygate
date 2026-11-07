@@ -147,7 +147,7 @@ async def create_waygate_client(
         and client.get("owner_user_id") == token_info["user_id"]
         and client.get("enabled")
     ):
-        nat_cidrs = await waygate_db.list_active_attachment_cidrs(server_id)
+        attachment_routes = await waygate_db.list_active_attachment_routes(server_id)
         tunnel_conf = waygate_config.render_client_conf(
             private_key=private_key,
             tunnel_ip=client["tunnel_ip"],
@@ -159,7 +159,7 @@ async def create_waygate_client(
             endpoint_ip=server["endpoint_ip"] or "",
             listen_port=server["listen_port"],
             allowed_ips=client.get("allowed_ips") or [server["tunnel_cidr"]],
-            nat_cidrs=nat_cidrs,
+            attachment_routes=attachment_routes,
         )
 
     info = _merge_client_status(client, await waygate_agent_auth.get_status_result(server_id))
@@ -247,7 +247,7 @@ async def download_vpn_client_config(server_id: str, client_id: str, token_info:
             _logger.error("Waygate 클라이언트 preshared key 복호화 실패 (client=%s)", client_id)
             raise HTTPException(status_code=500, detail="클라이언트 키 복호화에 실패했습니다. 관리자에게 문의하세요.")
 
-    nat_cidrs = await waygate_db.list_active_attachment_cidrs(server_id)
+    attachment_routes = await waygate_db.list_active_attachment_routes(server_id)
     tunnel_conf = waygate_config.render_client_conf(
         private_key=private_key,
         tunnel_ip=client["tunnel_ip"],
@@ -259,7 +259,7 @@ async def download_vpn_client_config(server_id: str, client_id: str, token_info:
         endpoint_ip=server["endpoint_ip"],
         listen_port=server["listen_port"],
         allowed_ips=client.get("allowed_ips") or [server["tunnel_cidr"]],
-        nat_cidrs=nat_cidrs,
+        attachment_routes=attachment_routes,
     )
 
     return Response(

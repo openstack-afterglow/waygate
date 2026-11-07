@@ -46,6 +46,13 @@ _SPECS = (
     PolicySpec("waygate.image", "image", "Waygate image", "Target-tenant-visible public image."),
     PolicySpec("waygate.flavor", "flavor", "Waygate flavor", "Target-tenant-visible public flavor."),
     PolicySpec(
+        "waygate.flavor_large",
+        "flavor",
+        "Waygate large flavor",
+        "Optional public flavor for gateways created with expected_clients above 50; "
+        "unset uses waygate.flavor for every gateway.",
+    ),
+    PolicySpec(
         "waygate.floating_network",
         "network",
         "Waygate floating network",

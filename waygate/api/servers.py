@@ -21,6 +21,15 @@ from waygate.services.store import WaygateServerInactiveError
 router = APIRouter()
 _logger = logging.getLogger(__name__)
 
+# Gateways expecting more clients than this use waygate.flavor_large when it is configured.
+SMALL_TIER_MAX_CLIENTS = 50
+
+
+def requested_flavor_tier(expected_clients: int | None) -> str | None:
+    if expected_clients is None:
+        return None
+    return "small" if expected_clients <= SMALL_TIER_MAX_CLIENTS else "large"
+
 
 def _require_db() -> None:
     if not is_db_available():
@@ -55,15 +64,24 @@ async def create_waygate_server(
     from waygate.services.resource_policies import get_policy_snapshot, resolve_policy_snapshot
 
     server_id = str(uuid.uuid4())
+    flavor_tier = requested_flavor_tier(body.expected_clients)
     try:
         async with execution.admitted_operation(token_info, server_id, "provision") as (grant, conn):
             snapshot = await resolve_policy_snapshot(
                 conn=conn,
                 keys=("waygate.provider_network", "waygate.image", "waygate.flavor"),
             )
-            floating_network = (await get_policy_snapshot(("waygate.floating_network",)))["waygate.floating_network"]
-            if floating_network is not None:
+            optional = await get_policy_snapshot(("waygate.floating_network", "waygate.flavor_large"))
+            if (floating_network := optional.get("waygate.floating_network")) is not None:
                 snapshot["waygate.floating_network"] = floating_network
+            flavor = snapshot["waygate.flavor"]
+            if flavor_tier == "large":
+                if optional.get("waygate.flavor_large") is not None:
+                    large = await resolve_policy_snapshot(conn=conn, keys=("waygate.flavor_large",))
+                    snapshot["waygate.flavor_large"] = flavor = large["waygate.flavor_large"]
+                else:
+                    # No large flavor configured: every gateway keeps the base flavor (no tiering).
+                    flavor_tier = "small"
             await waygate_jobs.enqueue_provision_job(
                 project_id,
                 server_id,
@@ -74,7 +92,9 @@ async def create_waygate_server(
                     "tunnel_cidr": settings.waygate_default_tunnel_cidr,
                     "dns": body.dns,
                     "persistent_keepalive": body.persistent_keepalive,
-                    "flavor_id": snapshot["waygate.flavor"]["id"],
+                    "flavor_id": flavor["id"],
+                    "expected_clients": body.expected_clients,
+                    "flavor_tier": flavor_tier,
                     "image_id": snapshot["waygate.image"]["id"],
                     "provider_network_id": snapshot["waygate.provider_network"]["id"],
                     "floating_network_id": (snapshot.get("waygate.floating_network") or {}).get("id"),

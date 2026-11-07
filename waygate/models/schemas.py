@@ -15,6 +15,27 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 WaygateServerStatus = Literal["CREATING", "PROVISIONING", "ACTIVE", "DELETING", "DELETED", "ERROR"]
 WaygateNatMode = Literal["snat"]
 WaygateAttachmentStatus = Literal["CREATING", "ACTIVE", "ERROR", "DELETING", "DELETED"]
+WaygateFlavorTier = Literal["small", "large"]
+
+# Per-attachment client routes (AllowedIPs) — independent of the attachment's physical NAT CIDR.
+MAX_ATTACHMENT_ALLOWED_IPS = 64
+
+
+def canonical_attachment_routes(values: list[str]) -> list[str]:
+    """Canonicalize (host bits cleared), deduplicate in order and reject default routes."""
+    canonical: list[str] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            raise ValueError("allowed_ips entries must be CIDR strings")
+        try:
+            network = ipaddress.ip_network(raw.strip(), strict=False)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"allowed_ips entry {raw!r} is not a valid CIDR") from exc
+        if network.prefixlen == 0:
+            raise ValueError("allowed_ips must not contain a default route (0.0.0.0/0 or ::/0)")
+        if (text := str(network)) not in canonical:
+            canonical.append(text)
+    return canonical
 
 
 class HealthResponse(BaseModel):
@@ -70,6 +91,8 @@ class WaygateServerCreateRequest(BaseModel):
     name: str = Field(default="")
     dns: str | None = None
     persistent_keepalive: int = Field(default=25, ge=0, le=65535, strict=True)
+    # Optional sizing hint: <=50 selects the small tier, more selects waygate.flavor_large when configured.
+    expected_clients: int | None = Field(default=None, ge=1, le=1000, strict=True)
 
     model_config = {"extra": "forbid"}
 
@@ -127,6 +150,8 @@ class WaygateServerInfo(BaseModel):
     persistent_keepalive: int = 25
     server_public_key: str | None = None
     agent_install_mode: str = "cloud-init"
+    expected_clients: int | None = None
+    flavor_tier: WaygateFlavorTier | None = None
     agent_source: str | None = None
     agent_token_issued_at: str | None = None
     agent_token_rotation_pending: bool = False
@@ -308,6 +333,12 @@ class WaygateNetworkAttachCreateRequest(BaseModel):
     network_id: str
     subnet_id: str | None = None
     nat_mode: WaygateNatMode = "snat"
+    allowed_ips: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENT_ALLOWED_IPS)
+
+    @field_validator("allowed_ips")
+    @classmethod
+    def validate_allowed_ips(cls, v: list[str]) -> list[str]:
+        return canonical_attachment_routes(v)
 
     @field_validator("network_id")
     @classmethod
@@ -333,6 +364,19 @@ class WaygateNetworkAttachCreateRequest(BaseModel):
         return v
 
 
+class WaygateNetworkAttachmentUpdateRequest(BaseModel):
+    """Replace one attachment's client routes; the physical interface and NAT CIDR are unchanged."""
+
+    allowed_ips: list[str] = Field(max_length=MAX_ATTACHMENT_ALLOWED_IPS)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("allowed_ips")
+    @classmethod
+    def validate_allowed_ips(cls, v: list[str]) -> list[str]:
+        return canonical_attachment_routes(v)
+
+
 class WaygateNetworkAttachmentInfo(BaseModel):
     """네트워크 연결 목록/상세 응답."""
 
@@ -343,6 +387,7 @@ class WaygateNetworkAttachmentInfo(BaseModel):
     subnet_id: str | None = None
     port_id: str | None = None
     cidr: str | None = None
+    allowed_ips: list[str] = []
     nat_mode: WaygateNatMode
     status: WaygateAttachmentStatus
     created_at: str | None = None

@@ -136,6 +136,7 @@ async def export_bundle(project_id: str, server: dict, passphrase: str, *, calle
                 "network_id": a["network_id"],
                 "subnet_id": a.get("subnet_id"),
                 "cidr": a.get("cidr"),
+                "allowed_ips": a.get("allowed_ips") or [],
                 "nat_mode": a.get("nat_mode", "snat"),
             }
             for a in attachments

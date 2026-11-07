@@ -18,6 +18,7 @@
 "waygate:client:download": "system_admin:True or role:member or role:manager or role:admin"
 "waygate:network:list": "system_admin:True or role:reader or role:member or role:manager or role:admin"
 "waygate:network:attach": "system_admin:True or role:member or role:manager or role:admin"
+"waygate:network:update": "system_admin:True or role:member or role:manager or role:admin"
 "waygate:network:detach": "system_admin:True or role:member or role:manager or role:admin"
 "waygate:bundle:export": "system_admin:True or role:member or role:manager or role:admin"
 "waygate:bundle:import": "system_admin:True or role:member or role:manager or role:admin"

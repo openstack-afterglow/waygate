@@ -2,7 +2,7 @@
 
 - API: 소유권(IDOR), 입력 검증(network_id/nat_mode), 상태 매핑(409/404/201/204).
 - 서비스: attach_network 중복/비ACTIVE 거부, happy path(mock conn/nova/db).
-- 렌더: desired-state nat_networks, client .conf 의 nat_cidrs 병합·중복 제거.
+- 렌더: desired-state nat_networks, client .conf 의 attachment_routes 병합·중복 제거.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -260,7 +260,7 @@ class TestAttachNetworkService:
 
 
 class TestRenderClientConfNat:
-    def test_conf_merges_nat_cidrs_and_dedups(self):
+    def test_conf_merges_attachment_routes_and_dedups(self):
         conf = waygate_config.render_client_conf(
             private_key="k",
             tunnel_ip="10.8.0.2",
@@ -269,7 +269,7 @@ class TestRenderClientConfNat:
             endpoint_ip="1.2.3.4",
             listen_port=51820,
             allowed_ips=["10.8.0.0/24"],
-            nat_cidrs=["192.168.5.0/24", "10.8.0.0/24"],
+            attachment_routes=["192.168.5.0/24", "10.8.0.0/24"],
         )
         allowed_line = next(line for line in conf.splitlines() if line.startswith("AllowedIPs"))
         assert "192.168.5.0/24" in allowed_line
