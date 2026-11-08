@@ -479,9 +479,16 @@ class WaygateAgentStatusReport(BaseModel):
         return self.diagnostics is None or self.diagnostics.wg_interface_up is not False
 
 
-WaygateDiagnosticsVerdict = Literal["ok", "never_connected", "not_polling", "not_reporting", "peer_mismatch"]
+WaygateDiagnosticsVerdict = Literal[
+    "ok", "never_connected", "not_polling", "not_reporting", "peer_mismatch", "peer_unknown"
+]
 WaygateDiagnosticsHint = Literal[
-    "agent_not_polling", "agent_never_reported", "agent_status_stale", "peers_mismatch", "image_agent_outdated"
+    "agent_not_polling",
+    "agent_never_reported",
+    "agent_status_stale",
+    "peers_mismatch",
+    "peer_observation_unavailable",
+    "image_agent_outdated",
 ]
 
 
@@ -493,7 +500,7 @@ class WaygateServerDiagnosticsAgent(BaseModel):
 
 
 class WaygateServerDiagnosticsStatus(BaseModel):
-    peers: int
+    peers: int | None
     reported_at: str
     diagnostics: WaygateAgentDiagnostics | None = None
 

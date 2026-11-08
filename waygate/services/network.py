@@ -17,7 +17,7 @@ import ipaddress
 import logging
 
 from waygate.services import neutron, nova, waygate_db
-from waygate.services.execution import ExecutionDenied, ExecutionUnavailable
+from waygate.services.execution import ExecutionDenied, ExecutionUnavailable, drain_task
 from waygate.services.store import WaygateServerInactiveError
 
 _logger = logging.getLogger(__name__)
@@ -54,6 +54,41 @@ def _network_attachable(net, project_id: str) -> bool:
     return getattr(net, "project_id", None) == project_id
 
 
+def _port_field(port, name: str):
+    return port.get(name) if isinstance(port, dict) else getattr(port, name, None)
+
+
+def _attachment_port_name(server_id: str, attachment_id: int) -> str:
+    return f"waygate-{server_id}-{attachment_id}"
+
+
+def _find_attachment_port_id(
+    conn, project_id: str, network_id: str, subnet_id: str | None, name: str
+) -> str | None:
+    """Resolve one exact, unbound port for a durable attachment intent."""
+    if not subnet_id:
+        raise RuntimeError("attachment intent has no subnet")
+    ports = list(conn.network.ports(project_id=project_id, network_id=network_id, name=name))
+    if not ports:
+        return None
+    if len(ports) != 1:
+        raise RuntimeError("attachment port marker is ambiguous")
+    port = ports[0]
+    port_project_id = _port_field(port, "project_id") or _port_field(port, "tenant_id")
+    fixed_ips = _port_field(port, "fixed_ips") or []
+    if (
+        not _port_field(port, "id")
+        or _port_field(port, "name") != name
+        or port_project_id != project_id
+        or _port_field(port, "network_id") != network_id
+        or _port_field(port, "device_id") not in (None, "")
+        or _port_field(port, "device_owner") not in (None, "")
+        or not any(_port_field(fixed_ip, "subnet_id") == subnet_id for fixed_ip in fixed_ips)
+    ):
+        raise RuntimeError("attachment port does not match its durable intent")
+    return _port_field(port, "id")
+
+
 def _resolve_cidr(conn, network_id: str, subnet_id: str | None) -> tuple[str, str]:
     """(subnet_id, cidr) 반환. subnet_id 미지정 시 네트워크의 첫 IPv4 서브넷을 사용."""
     if subnet_id:
@@ -83,6 +118,23 @@ async def attach_network(
     conn,
     allowed_ips: list[str] | None = None,
 ) -> dict:
+    """Drain the attachment outcome before cancellation can close its provider connection."""
+    operation = _attach_network(
+        project_id, server, network_id, subnet_id, nat_mode, conn=conn, allowed_ips=allowed_ips
+    )
+    return await drain_task(asyncio.create_task(operation))
+
+
+async def _attach_network(
+    project_id: str,
+    server: dict,
+    network_id: str,
+    subnet_id: str | None,
+    nat_mode: str,
+    *,
+    conn,
+    allowed_ips: list[str] | None = None,
+) -> dict:
     """서버에 네트워크 인터페이스를 연결하고 attachment dict 를 반환한다."""
     server_id = server["id"]
     vm_id = server.get("server_vm_id")
@@ -92,7 +144,7 @@ async def attach_network(
 
     # 중복 연결 방지
     existing = await waygate_db.list_attachments(server_id, project_id)
-    if any(a["network_id"] == network_id and a["status"] != "ERROR" for a in existing):
+    if any(a["network_id"] == network_id for a in existing):
         raise WaygateNetworkError(409, "이미 연결된 네트워크입니다")
 
     net = await asyncio.to_thread(conn.network.get_network, network_id)
@@ -118,15 +170,52 @@ async def attach_network(
     except WaygateServerInactiveError as exc:
         raise WaygateNetworkError(409, "Waygate 서버가 ACTIVE 상태가 아닙니다") from exc
     port_id: str | None = None
+    port_creation_unresolved = True
+    port_name = _attachment_port_name(server_id, att["id"])
     try:
-        port = await asyncio.to_thread(
-            neutron.create_port,
-            conn,
-            network_id,
-            f"waygate-{server_id}-{att['id']}",
-            fixed_ips=[{"subnet_id": resolved_subnet_id}],
-        )
-        port_id = port["id"]
+        try:
+            port = await asyncio.to_thread(
+                neutron.create_port,
+                conn,
+                network_id,
+                port_name,
+                fixed_ips=[{"subnet_id": resolved_subnet_id}],
+            )
+            port_id = port.get("id")
+            if not port_id:
+                raise RuntimeError("Neutron create_port response has no id")
+            port_creation_unresolved = False
+        except (ExecutionDenied, ExecutionUnavailable):
+            raise
+        except Exception as create_error:
+            try:
+                port_id = await asyncio.to_thread(
+                    _find_attachment_port_id,
+                    conn,
+                    project_id,
+                    network_id,
+                    resolved_subnet_id,
+                    port_name,
+                )
+            except (ExecutionDenied, ExecutionUnavailable):
+                raise
+            except Exception as lookup_error:
+                _logger.warning(
+                    "waygate_network: create_port outcome unresolved (server=%s, attachment=%s, error_type=%s)",
+                    server_id,
+                    att["id"],
+                    type(lookup_error).__name__,
+                )
+                raise create_error from lookup_error
+            if port_id is None:
+                raise create_error
+            port_creation_unresolved = False
+            _logger.warning(
+                "waygate_network: recovered accepted port response (server=%s, attachment=%s)",
+                server_id,
+                att["id"],
+            )
+
         await waygate_db.update_attachment(att["id"], port_id=port_id)
         await asyncio.to_thread(nova.attach_interface, conn, vm_id, port_id)
     except (ExecutionDenied, ExecutionUnavailable):
@@ -140,6 +229,9 @@ async def attach_network(
             e,
             exc_info=True,
         )
+        if port_creation_unresolved:
+            await waygate_db.update_attachment(att["id"], status="ERROR", port_id=port_id)
+            raise WaygateNetworkError(500, "네트워크 인터페이스 연결에 실패했습니다") from e
         if port_id:
             try:
                 await asyncio.to_thread(neutron.delete_port, conn, port_id)
@@ -185,6 +277,11 @@ async def update_attachment_routes(project_id: str, server: dict, attachment_id:
 
 
 async def detach_network(project_id: str, server: dict, attachment_id: int, *, conn) -> None:
+    """Drain detach and provider cleanup before cancellation closes the connection."""
+    await drain_task(asyncio.create_task(_detach_network(project_id, server, attachment_id, conn=conn)))
+
+
+async def _detach_network(project_id: str, server: dict, attachment_id: int, *, conn) -> None:
     """네트워크 연결을 해제한다(포트 삭제 + 레코드 삭제)."""
     server_id = server["id"]
     att = await waygate_db.get_attachment(server_id, project_id, attachment_id)
@@ -195,6 +292,31 @@ async def detach_network(project_id: str, server: dict, attachment_id: int, *, c
 
     vm_id = server.get("server_vm_id")
     port_id = att.get("port_id")
+    if not port_id and att.get("status") == "ERROR":
+        try:
+            port_id = await asyncio.to_thread(
+                _find_attachment_port_id,
+                conn,
+                project_id,
+                att["network_id"],
+                att.get("subnet_id"),
+                _attachment_port_name(server_id, att["id"]),
+            )
+        except (ExecutionDenied, ExecutionUnavailable):
+            raise
+        except Exception as e:
+            _logger.warning(
+                "waygate_network: unresolved attachment port lookup failed (server=%s, attachment=%s, error_type=%s)",
+                server_id,
+                att["id"],
+                type(e).__name__,
+            )
+            raise WaygateNetworkError(500, "네트워크 연결 상태를 확인할 수 없습니다") from e
+        if port_id is None:
+            await waygate_db.delete_attachment(server_id, project_id, attachment_id)
+            _logger.info("waygate_network: server=%s attachment=%s removed without a provider port", server_id, attachment_id)
+            return
+        await waygate_db.update_attachment(attachment_id, port_id=port_id)
     if vm_id and port_id:
         try:
             await asyncio.to_thread(nova.detach_interface, conn, vm_id, port_id)

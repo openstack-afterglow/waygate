@@ -102,6 +102,28 @@ def test_verdict_peer_mismatch_only_while_fresh():
     assert result["expected"] == {"enabled_clients": 2, "attachments": 1}
 
 
+@pytest.mark.parametrize(
+    "peers,enabled_clients",
+    [(None, 0), ("2", 2)],
+    ids=["first-report-no-clients", "cached-peer-count-matches"],
+)
+def test_failed_wg_read_never_claims_peer_state_is_known(peers, enabled_clients):
+    telemetry = {
+        "register_at": _iso(10),
+        "desired_state_at": _iso(5),
+        "status_at": _iso(1),
+        "diagnostics": '{"wg_interface_up": false, "error": "wg_show_failed"}',
+    }
+    if peers is not None:
+        telemetry["peers"] = peers
+
+    result = _evaluate(telemetry, enabled_clients=enabled_clients)
+
+    assert result["verdict"] == "peer_unknown"
+    assert result["hints"] == ["peer_observation_unavailable"]
+    assert result["last_status"]["peers"] is None
+
+
 def test_verdict_ok_and_freshness_boundary():
     telemetry = {
         "register_at": _iso(3600),
@@ -289,8 +311,12 @@ async def test_failed_wg_read_keeps_cached_peers_and_surfaces_agent_diagnostics(
     assert [peer["public_key"] for peer in cached["peers"]] == [_PEER]
     result = await _diagnostics(api)
     assert result["last_status_at"] == api.clock.now.isoformat()
-    assert result["last_status"]["peers"] == 1
-    assert result["last_status"]["diagnostics"] == {"reconcile_ok": None, "wg_interface_up": False, "error": "wg_show_failed"}
+    assert result["verdict"] == "peer_unknown"
+    assert result["hints"] == ["peer_observation_unavailable"]
+    assert result["last_status"]["peers"] is None
+    assert result["last_status"]["diagnostics"] == {
+        "reconcile_ok": None, "wg_interface_up": False, "error": "wg_show_failed"
+    }
 
 
 async def test_status_telemetry_is_rate_limited_per_server(diagnostics_api):

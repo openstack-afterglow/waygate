@@ -191,6 +191,8 @@ def evaluate(
     # after telemetry has expired or predates this release.
     registered = register_at is not None or bool(server.get("server_public_key"))
     peers = _parse_int(telemetry.get("peers"))
+    diagnostics = _parse_diagnostics(telemetry.get("diagnostics"))
+    peers_observed = peers is not None and (diagnostics is None or diagnostics["wg_interface_up"] is not False)
     install_mode = "prebuilt" if server.get("agent_install_mode") == "prebuilt" else "cloud-init"
 
     def stale(observed: datetime | None, limit: int) -> bool:
@@ -205,7 +207,10 @@ def evaluate(
         hints.append("agent_not_polling")
     elif stale(status_at, STATUS_STALE_SECONDS):
         verdict = "not_reporting"
-    elif (peers or 0) != enabled_clients:
+    elif not peers_observed:
+        verdict = "peer_unknown"
+        hints.append("peer_observation_unavailable")
+    elif peers != enabled_clients:
         verdict = "peer_mismatch"
         hints.append("peers_mismatch")
     else:
@@ -227,9 +232,9 @@ def evaluate(
     last_status = None
     if status_at is not None:
         last_status = {
-            "peers": peers or 0,
+            "peers": peers if peers_observed else None,
             "reported_at": status_at.isoformat(),
-            "diagnostics": _parse_diagnostics(telemetry.get("diagnostics")),
+            "diagnostics": diagnostics,
         }
     return {
         "verdict": verdict,

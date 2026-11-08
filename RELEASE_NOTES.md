@@ -1,3 +1,38 @@
+# Waygate 0.3.8 — agent diagnostics, gateway sizing and attachment routes
+
+## 한국어
+- **버전/일자:** 0.3.8; 후보 준비 2026-11-09 UTC. 발행/운영 배포 일시: 아직 없음.
+- **추가:** `GET /v1/servers/{server_id}/diagnostics`가 Waygate 수신 시각, 예상 client/attachment 수, 상태 verdict/hint를 반환한다. `wg show` 실패 시 cached peer 수를 최신 관측처럼 재사용하지 않고 `peer_unknown`을 반환한다.
+- **추가:** `POST /v1/servers`의 선택 필드 `expected_clients`(1–1000)가 50명 초과일 때 선택적 `waygate.flavor_large`를 사용한다. 설정하지 않으면 `waygate.flavor`로 fallback한다.
+- **변경:** attachment별 `allowed_ips`를 지원한다. 기존 subnet CIDR은 physical interface/NAT용으로 유지하고, client `AllowedIPs`는 attachment별 route 합집합을 사용한다. `PATCH /v1/servers/{server_id}/networks/{attachment_id}`는 `waygate:network:update`를 요구한다. 소유 project network와 Neutron이 명시한 shared/external provider network만 연결할 수 있다.
+- **수정:** cloud-init은 현재 agent를 prebuilt 이미지에도 설치한다. 기존 timer/service 중지 실패 시 fail-closed로 중단한다. Attachment cancellation은 provider 작업과 durable outcome을 drain하며, Neutron create 응답 유실은 정확히 한 개의 scope 일치 port만 복구한다. 모호하거나 찾지 못한 create intent는 `ERROR`로 남겨 중복 attach를 막는다.
+- **이행:** additive migration `008_gateway_sizing_and_attachment_routes`는 `expected_clients`, `flavor_tier`, attachment `allowed_ips`를 추가하고 기존 CIDR을 `[cidr]`로 backfill한다. 새 API/worker를 시작하기 전에 migration을 적용한다.
+- **버전 경계:** root distribution/runtime/lock/Kolla registry default는 `0.3.8`; independent SDK는 `0.2.0`으로 유지한다. SDK에는 diagnostics/attachment-route 전용 method가 추가되지 않아 이 API는 REST로 호출한다. 기존 gateway VM agent는 자동 변경되지 않는다.
+
+## English
+- **Version/date:** 0.3.8; candidate prepared 2026-11-09 UTC. Publication/deployment dates: None yet.
+- **Added:** `GET /v1/servers/{server_id}/diagnostics` reports Waygate receive times, expected client/attachment counts and a bounded verdict/hint. A failed `wg show` returns `peer_unknown`; a cached peer count is never treated as a current observation.
+- **Added:** Optional `expected_clients` (1–1000) on `POST /v1/servers` selects optional `waygate.flavor_large` above 50 clients, falling back to `waygate.flavor` when unset.
+- **Changed:** Network attachments accept per-attachment `allowed_ips`. The subnet CIDR remains the physical-interface/NAT route; client `AllowedIPs` uses the union of attachment routes. `PATCH /v1/servers/{server_id}/networks/{attachment_id}` requires `waygate:network:update`. Only owned or explicitly shared/external Neutron networks are attachable.
+- **Fixed:** Cloud-init installs current agent assets for prebuilt images and aborts before registration/activation if the legacy timer or service cannot stop. Attachment work drains provider calls and durable state on cancellation. A lost Neutron create response recovers only one exact scoped port; unresolved intent remains `ERROR` and blocks duplicate attachment creation.
+- **Upgrade:** Additive migration `008_gateway_sizing_and_attachment_routes` adds sizing fields and JSON `allowed_ips`, then backfills existing attachments from their CIDR. Apply it before starting new API/worker processes.
+- **Version boundary:** Root distribution/runtime/lock/Kolla registry default are `0.3.8`; the independent SDK remains `0.2.0`. The SDK has no diagnostics or attachment-route methods; clients must use REST. Existing gateway VMs are not changed automatically.
+
+## Source provenance and release boundaries
+
+The candidate starts from observed `origin/dev` commit `89cdd1b9d7138abed168839b25072ba085943506` and includes diagnostics commit `7b73cb2` plus attachment/sizing commit `ff3eaee`. The dirty primary checkout contains unrelated administrator-executor work and is not included. Create immutable annotated tag `v0.3.8`; the Docker metadata action emits semver image tag `0.3.8` and may also update its automatic `latest` tag. The workflow publishes hosted `linux/amd64` API/worker images after the service/SDK test gate. It does not create a GitHub Release or upload a wheel.
+
+## Upgrade prerequisites
+
+Back up MariaDB, encryption key, effective Kolla configuration and previous immutable API/worker image digests. Quiesce lifecycle admission, finish or reconcile jobs, and stop the old API/worker cohort before starting the new code. Apply migration `008_gateway_sizing_and_attachment_routes` through the documented Kolla bootstrap/upgrade path; `reconfigure` does not apply migrations. Preserve `waygate_source_version` unless source mode is explicitly qualified against the release commit. Existing VMs retain their current agent and require separate recreation to change it.
+
+## Maintainer gates and manual publication
+
+1. On the reviewed candidate commit, run `python3 scripts/check_architecture.py --stamp --summary "Reviewed diagnostics, agent boot replacement, attachment routes, gateway sizing, migration 008 and provider cancellation/recovery"` and `python3 scripts/check_architecture.py`. Run frozen service/SDK sync, serial and four-worker service tests, both Ruff checks, and `python3 scripts/check_architecture.py --staged` after staging only intended files.
+2. Create annotated tag `v0.3.8` on the exact release commit, push the release branch and then the tag. Wait for the tag-triggered Docker workflow to pass; record both GHCR `linux/amd64` image digests and source revision. Do not move tags or overwrite artifacts.
+3. Build the same-source Kolla wheel with `uv build --wheel --out-dir dist/0.3.8`, inspect its metadata/shared-data role, and record its SHA-256. The workflow does not upload the wheel. Attach it manually with `gh release create v0.3.8 dist/0.3.8/waygate-0.3.8-py3-none-any.whl --verify-tag --title 'Waygate 0.3.8' --notes-file RELEASE_NOTES.md`. This is a GitHub asset upload, not a PyPI release.
+4. Roll out only after publication. Pin the qualified image digests, install the same-source role/wheel, use the approved Kolla path, and verify migration, readiness, authenticated behavior and live lifecycle separately. `/v1/health` alone is not readiness or dataplane proof.
+
 # Waygate 0.3.7 — native Trust execution correction candidate
 
 ## 한국어

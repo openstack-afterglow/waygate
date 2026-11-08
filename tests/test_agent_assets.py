@@ -223,9 +223,10 @@ def test_prebuilt_userdata_replaces_stale_image_oneshot_agent(installer_runtime)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(entry["content"])
         path.chmod(int(entry["permissions"], 8))
-    # Run the real runcmd lines through sh -e with systemctl/rm redirected into the
+    # Run the real runcmd script through sh -e with systemctl/rm redirected into the
     # guest root. Kernel sysctl and the networked register step are out of scope.
-    lines = [line for line in userdata["runcmd"] if not line.startswith(("sysctl ", "/usr/bin/python3 "))]
+    script = "\n".join(userdata["runcmd"])
+    lines = [line for line in script.splitlines() if not line.startswith(("sysctl ", "/usr/bin/python3 "))]
     subprocess.run(["sh", "-ec", "\n".join(lines)], check=True)
 
     units = root / "etc/systemd/system"
@@ -239,11 +240,61 @@ def test_prebuilt_userdata_replaces_stale_image_oneshot_agent(installer_runtime)
     assert json.loads(state.read_text()) == {"timer_active": False, "timer_enabled": False, "service_active": True}
     controls = [call for line in events.read_text().splitlines() if (call := json.loads(line))[0] == "systemctl"]
     assert controls == [
-        ["systemctl", "disable", "--now", "afterglow-waygate-reconcile.timer"],
+        ["systemctl", "show", "--property=LoadState", "--value", "afterglow-waygate-reconcile.timer"],
+        ["systemctl", "stop", "afterglow-waygate-reconcile.timer"],
+        ["systemctl", "disable", "afterglow-waygate-reconcile.timer"],
+        ["systemctl", "show", "--property=LoadState", "--value", "afterglow-waygate-reconcile.service"],
         ["systemctl", "stop", "afterglow-waygate-reconcile.service"],
         ["systemctl", "daemon-reload"],
         ["systemctl", "enable", "--now", "afterglow-waygate-reconcile.service"],
     ]
+
+
+@pytest.mark.parametrize(
+    "failed_unit,expected_timer_active",
+    [
+        ("afterglow-waygate-reconcile.timer", True),
+        ("afterglow-waygate-reconcile.service", False),
+    ],
+)
+def test_cloud_init_aborts_when_stale_agent_cannot_stop(
+    installer_runtime, monkeypatch, failed_unit, expected_timer_active
+):
+    root, state, events = installer_runtime
+    userdata = yaml.safe_load(
+        base64.b64decode(
+            render_agent_userdata(
+                server_name="stale-gateway",
+                listen_port=51820,
+                tunnel_cidr="10.8.0.0/24",
+                register_url="https://waygate.example/v1/servers/s1/agent/register",
+                desired_state_url="https://waygate.example/v1/servers/s1/agent/desired-state",
+                status_url="https://waygate.example/v1/servers/s1/agent/status",
+                bootstrap_token="current-token-abcdefghijklmnop",
+                install_packages=False,
+            )
+        )
+    )
+    for entry in userdata["write_files"]:
+        path = root / entry["path"].lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(entry["content"])
+        path.chmod(int(entry["permissions"], 8))
+    monkeypatch.setenv("FAIL_STOP", failed_unit)
+    script = "\n".join(userdata["runcmd"])
+    lines = [line for line in script.splitlines() if not line.startswith(("sysctl ", "/usr/bin/python3 "))]
+
+    result = subprocess.run(["sh", "-ec", "\n".join(lines)], check=False)
+
+    assert result.returncode != 0
+    assert json.loads(state.read_text()) == {
+        "timer_active": expected_timer_active,
+        "timer_enabled": expected_timer_active,
+        "service_active": True,
+    }
+    controls = [call for line in events.read_text().splitlines() if (call := json.loads(line))[0] == "systemctl"]
+    assert not any(call[1] == "enable" for call in controls)
+    assert not any(call[1] == "daemon-reload" for call in controls)
 
 
 def test_interface_section_includes_gateway_address_and_port(agent):
@@ -582,12 +633,12 @@ def test_installed_agent_runs_both_jobs_in_both_image_modes(report_runtime, tmp_
         path.write_text(entry["content"])
         path.chmod(int(entry["permissions"], 8))
 
-    commands = [shlex.split(command) for command in userdata["runcmd"]]
-    timer_stop = commands.index(["systemctl", "disable", "--now", "afterglow-waygate-reconcile.timer", "||", "true"])
-    service_stop = commands.index(["systemctl", "stop", "afterglow-waygate-reconcile.service", "||", "true"])
-    reload = commands.index(["systemctl", "daemon-reload"])
-    registration = commands.index(["/usr/bin/python3", "/opt/afterglow/waygate_agent.py", "register"])
-    activation = commands.index(["systemctl", "enable", "--now", "afterglow-waygate-reconcile.service"])
+    script = "\n".join(userdata["runcmd"])
+    timer_stop = script.index('systemctl stop "$timer_unit"')
+    service_stop = script.index('systemctl stop "$service_unit"')
+    reload = script.index("systemctl daemon-reload")
+    registration = script.index("/usr/bin/python3 /opt/afterglow/waygate_agent.py register")
+    activation = script.index("systemctl enable --now afterglow-waygate-reconcile.service")
     assert timer_stop < service_stop < reload < registration < activation
     units = root / "etc/systemd/system"
     assert {unit.name for unit in units.iterdir()} == {"afterglow-waygate-reconcile.service"}

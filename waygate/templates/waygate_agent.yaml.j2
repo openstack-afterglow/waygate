@@ -21,10 +21,21 @@ write_files:
 {{ file.content | indent(6, first=True) }}
 {% endfor %}
 runcmd:
-  - systemctl disable --now afterglow-waygate-reconcile.timer || true
-  - rm -f /etc/systemd/system/afterglow-waygate-reconcile.timer /etc/systemd/system/timers.target.wants/afterglow-waygate-reconcile.timer
-  - systemctl stop afterglow-waygate-reconcile.service || true
-  - systemctl daemon-reload
-  - sysctl --system
-  - /usr/bin/python3 /opt/afterglow/waygate_agent.py register
-  - systemctl enable --now afterglow-waygate-reconcile.service
+  - |
+    set -eu
+    timer_unit=afterglow-waygate-reconcile.timer
+    timer_state=$(systemctl show --property=LoadState --value "$timer_unit")
+    if [ "$timer_state" != not-found ]; then
+      systemctl stop "$timer_unit"
+      systemctl disable "$timer_unit"
+    fi
+    rm -f /etc/systemd/system/afterglow-waygate-reconcile.timer /etc/systemd/system/timers.target.wants/afterglow-waygate-reconcile.timer
+    service_unit=afterglow-waygate-reconcile.service
+    service_state=$(systemctl show --property=LoadState --value "$service_unit")
+    if [ "$service_state" != not-found ]; then
+      systemctl stop "$service_unit"
+    fi
+    systemctl daemon-reload
+    sysctl --system
+    /usr/bin/python3 /opt/afterglow/waygate_agent.py register
+    systemctl enable --now afterglow-waygate-reconcile.service

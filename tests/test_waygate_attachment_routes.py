@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -24,8 +26,8 @@ from waygate.models.schemas import (
     WaygateNetworkAttachmentUpdateRequest,
     WaygateServerCreateRequest,
 )
+from waygate.services import execution, waygate_config, waygate_db
 from waygate.services import network as waygate_network
-from waygate.services import waygate_config, waygate_db
 from waygate.services.network import WaygateNetworkError
 
 NETWORK_ID = "11111111-2222-3333-4444-555555555555"
@@ -136,6 +138,133 @@ def _attach_doubles(monkeypatch) -> AsyncMock:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["create-port", "attach-interface", "detach-interface", "delete-port"])
+@pytest.mark.parametrize("provider_fails", [False, True])
+async def test_attachment_cancellation_drains_provider_work_before_connection_close(
+    monkeypatch, stage, provider_fails
+):
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    state = {
+        "port": stage.startswith("detach") or stage == "delete-port",
+        "attached": stage.startswith("detach") or stage == "delete-port",
+        "record": None,
+        "closed": False,
+        "retired": False,
+        "thread_exited": False,
+    }
+    attachment = {"id": 1, "server_id": "server-1", "network_id": "net-1", "port_id": "port-1", "status": "ACTIVE"}
+    grant = SimpleNamespace(
+        id="grant-1",
+        project_id=PROJECT,
+        server_id="server-1",
+        user_id="requester",
+        purpose="attach" if stage in {"create-port", "attach-interface"} else "detach",
+    )
+    conn = _attach_conn(SimpleNamespace(project_id=PROJECT, is_shared=False, is_router_external=False))
+    conn.network.ports.return_value = []
+    if state["record"] is None and stage in {"detach-interface", "delete-port"}:
+        state["record"] = dict(attachment)
+
+    def held_provider(point):
+        assert not state["closed"] and not state["retired"]
+        if point == stage:
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                assert release.wait(10), "Routing cancellation fixture was not released"
+                if provider_fails:
+                    raise RuntimeError("synthetic provider failure")
+            finally:
+                state["thread_exited"] = True
+
+    def create_port(*_args, **_kwargs):
+        held_provider("create-port")
+        state["port"] = True
+        return {"id": "port-1"}
+
+    def attach_interface(*_args):
+        held_provider("attach-interface")
+        state["attached"] = True
+
+    def detach_interface(*_args):
+        held_provider("detach-interface")
+        state["attached"] = False
+
+    def delete_port(*_args):
+        held_provider("delete-port")
+        state["port"] = state["attached"] = False
+
+    async def create_record(_server_id, _project_id, data):
+        state["record"] = {"id": 1, **data}
+        return dict(state["record"])
+
+    async def update_record(_attachment_id, **fields):
+        state["record"].update(fields)
+
+    async def delete_record(*_args):
+        state["record"] = None
+
+    @contextlib.asynccontextmanager
+    async def connection(*_args):
+        try:
+            yield conn
+        finally:
+            assert state["thread_exited"]
+            state["closed"] = True
+
+    async def retire(*_args):
+        assert state["closed"] and state["thread_exited"]
+        state["retired"] = True
+
+    monkeypatch.setattr(execution, "create_grant", AsyncMock(return_value=grant))
+    monkeypatch.setattr(execution, "execution_connection", connection)
+    monkeypatch.setattr(execution, "retire_unbound_grant", retire)
+    monkeypatch.setattr(waygate_network.neutron, "create_port", create_port)
+    monkeypatch.setattr(waygate_network.neutron, "delete_port", delete_port)
+    monkeypatch.setattr(waygate_network.nova, "attach_interface", attach_interface)
+    monkeypatch.setattr(waygate_network.nova, "detach_interface", detach_interface)
+    monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(waygate_network.waygate_db, "get_attachment", AsyncMock(return_value=attachment))
+    monkeypatch.setattr(waygate_network.waygate_db, "create_attachment_record", create_record)
+    monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", update_record)
+    monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_record)
+
+    async def routing_operation():
+        async with execution.admitted_operation({}, "server-1", grant.purpose) as (_grant, admitted_conn):
+            if stage in {"create-port", "attach-interface"}:
+                await waygate_network.attach_network(
+                    PROJECT, _server(), "net-1", "sub-1", "snat", conn=admitted_conn
+                )
+            else:
+                await waygate_network.detach_network(PROJECT, _server(), 1, conn=admitted_conn)
+
+    task = asyncio.create_task(routing_operation())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done() and not state["closed"] and not state["retired"]
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=15)
+
+    assert state["closed"] and state["retired"] and state["thread_exited"]
+    if stage == "create-port" and provider_fails:
+        assert state["record"]["status"] == "ERROR" and state["record"]["port_id"] is None
+        assert not state["port"] and not state["attached"]
+    elif stage in {"create-port", "attach-interface"} and not provider_fails:
+        assert state["record"]["status"] == "ACTIVE" and state["record"]["port_id"] == "port-1"
+        assert state["port"] and state["attached"]
+    elif stage == "delete-port" and provider_fails:
+        assert state["record"]["status"] == "ERROR" and state["record"]["port_id"] == "port-1"
+        assert state["port"]
+    else:
+        assert state["record"] is None and not state["port"] and not state["attached"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "network",
     [
@@ -154,6 +283,113 @@ async def test_owned_shared_and_external_networks_are_attachable(monkeypatch, ne
     assert result["cidr"] == "192.168.9.0/24"
     assert result["allowed_ips"] == ["192.168.9.0/24"]
     assert create.await_args.args[2]["allowed_ips"] == ["192.168.9.0/24"]
+
+
+@pytest.mark.asyncio
+async def test_create_port_response_loss_recovers_exact_unbound_attachment_port(monkeypatch):
+    conn = _attach_conn(SimpleNamespace(project_id=PROJECT, is_shared=False, is_router_external=False))
+    conn.network.ports.return_value = [
+        SimpleNamespace(
+            id="port-1",
+            name="waygate-server-1-7",
+            project_id=PROJECT,
+            network_id="net-1",
+            fixed_ips=[{"subnet_id": "sub-1"}],
+            device_id=None,
+            device_owner=None,
+        )
+    ]
+    create_record = AsyncMock(
+        side_effect=lambda _server, _project, data: {"id": 7, **data}
+    )
+    update_record = AsyncMock()
+    create_port = MagicMock(side_effect=RuntimeError("response lost after Neutron accepted request"))
+    monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(waygate_network.waygate_db, "create_attachment_record", create_record)
+    monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", update_record)
+    monkeypatch.setattr(waygate_network.neutron, "create_port", create_port)
+    monkeypatch.setattr(waygate_network.nova, "attach_interface", MagicMock())
+
+    result = await waygate_network.attach_network(
+        PROJECT, _server(), "net-1", "sub-1", "snat", conn=conn, allowed_ips=["192.168.9.0/24"]
+    )
+
+    assert result["status"] == "ACTIVE" and result["port_id"] == "port-1"
+    create_port.assert_called_once()
+    conn.network.ports.assert_called_once_with(
+        project_id=PROJECT, network_id="net-1", name="waygate-server-1-7"
+    )
+    assert update_record.await_args_list[0].kwargs == {"port_id": "port-1"}
+    assert update_record.await_args_list[1].kwargs == {"status": "ACTIVE"}
+
+
+@pytest.mark.asyncio
+async def test_unresolved_port_create_retains_error_attachment_and_blocks_retry(monkeypatch):
+    conn = _attach_conn(SimpleNamespace(project_id=PROJECT, is_shared=False, is_router_external=False))
+    conn.network.ports.return_value = []
+    create_record = AsyncMock(side_effect=lambda _server, _project, data: {"id": 7, **data})
+    update_record = AsyncMock()
+    delete_record = AsyncMock()
+    create_port = MagicMock(side_effect=RuntimeError("Neutron create response was lost"))
+    attachments = AsyncMock(side_effect=[[], [{"network_id": "net-1", "status": "ERROR"}]])
+    monkeypatch.setattr(waygate_network.waygate_db, "list_attachments", attachments)
+    monkeypatch.setattr(waygate_network.waygate_db, "create_attachment_record", create_record)
+    monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", update_record)
+    monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_record)
+    monkeypatch.setattr(waygate_network.neutron, "create_port", create_port)
+
+    with pytest.raises(WaygateNetworkError) as failed:
+        await waygate_network.attach_network(PROJECT, _server(), "net-1", "sub-1", "snat", conn=conn)
+
+    assert failed.value.status_code == 500
+    assert update_record.await_args.kwargs == {"status": "ERROR", "port_id": None}
+    delete_record.assert_not_awaited()
+    with pytest.raises(WaygateNetworkError) as duplicate:
+        await waygate_network.attach_network(PROJECT, _server(), "net-1", "sub-1", "snat", conn=conn)
+    assert duplicate.value.status_code == 409
+    create_port.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_detach_recovers_unknown_port_from_error_attachment(monkeypatch):
+    conn = _attach_conn(SimpleNamespace(project_id=PROJECT, is_shared=False, is_router_external=False))
+    conn.network.ports.return_value = [
+        SimpleNamespace(
+            id="port-1",
+            name="waygate-server-1-7",
+            project_id=PROJECT,
+            network_id="net-1",
+            fixed_ips=[{"subnet_id": "sub-1"}],
+            device_id=None,
+            device_owner=None,
+        )
+    ]
+    attachment = {
+        "id": 7,
+        "network_id": "net-1",
+        "subnet_id": "sub-1",
+        "status": "ERROR",
+        "port_id": None,
+    }
+    update_record = AsyncMock()
+    delete_record = AsyncMock()
+    delete_port = MagicMock()
+    detach_interface = MagicMock()
+    monkeypatch.setattr(waygate_network.waygate_db, "get_attachment", AsyncMock(return_value=attachment))
+    monkeypatch.setattr(waygate_network.waygate_db, "update_attachment", update_record)
+    monkeypatch.setattr(waygate_network.waygate_db, "delete_attachment", delete_record)
+    monkeypatch.setattr(waygate_network.neutron, "delete_port", delete_port)
+    monkeypatch.setattr(waygate_network.nova, "detach_interface", detach_interface)
+
+    await waygate_network.detach_network(PROJECT, _server(), 7, conn=conn)
+
+    conn.network.ports.assert_called_once_with(
+        project_id=PROJECT, network_id="net-1", name="waygate-server-1-7"
+    )
+    update_record.assert_awaited_once_with(7, port_id="port-1")
+    detach_interface.assert_called_once_with(conn, "vm-1", "port-1")
+    delete_port.assert_called_once_with(conn, "port-1")
+    delete_record.assert_awaited_once_with("server-1", PROJECT, 7)
 
 
 @pytest.mark.asyncio
