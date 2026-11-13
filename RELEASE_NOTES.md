@@ -1,22 +1,30 @@
 # Waygate 0.3.9 — owned detached-port delete recovery
 
 ## 한국어
-- **버전/일자:** 0.3.9; 후보 준비 2026-11-13 UTC. 발행/운영 배포 대기.
+- **버전/일자:** 0.3.9; numeric tag `0.3.9`, GHCR images와 GitHub Release wheel 발행 및 DMSLAB 운영 배포 완료 2026-11-13 UTC.
 - **수정:** Nova 생성 실패 뒤 VM이 ERROR이고 기록된 provider port가 미연결 상태여도, DB VM identity/create intent와 VM metadata, port ID/project/network가 정확히 일치하면 삭제 worker가 기존 `force=True` Nova delete 후 durable job 재시도를 수행한다. Intent 누락·범위 불일치는 계속 거부한다.
 - **이행:** API/worker 이미지와 Kolla wheel의 버전을 0.3.9로 올린다. Schema/migration, dependency, SDK contract 변경은 없다. Numeric tag `0.3.9`를 사용한다. Existing VMs are otherwise unchanged.
 
 ## English
-- **Version/date:** 0.3.9; candidate prepared 2026-11-13 UTC. Publication/deployment pending.
+- **Version/date:** 0.3.9; numeric tag `0.3.9`, GHCR images and GitHub Release wheel published, DMSLAB deployment completed 2026-11-13 UTC.
 - **Fixed:** After Nova create failure, permit deletion when an ERROR VM's recorded provider port is detached only if durable VM identity/create intent, VM metadata, and exact port ID/project/network still match. Reuse Nova `force=True` and durable job retries; reject missing intent or scope mismatch.
 - **Upgrade:** Update API/worker images and the Kolla wheel to 0.3.9. No schema/migration, dependency, or SDK contract changes. Use numeric release tag `0.3.9`; existing VMs are otherwise unchanged.
 
 ## Source provenance and release gates
 
-The candidate includes deletion recovery commits `1a42890` and `b2f24d3` on top of deployed Waygate 0.3.8 source `8238a321a70665fea2b715e6c68fd42a06c1defa`. Release only from the reviewed version-bump commit. The numeric tag-triggered Docker workflow must pass service and SDK gates before publishing immutable API/worker digests. Build the Kolla wheel from that same commit, verify its shared role and checksum, then attach it to GitHub Release `0.3.9`. Back up MariaDB, protected config and prior immutable digests; pin the new image digests and install the same-source wheel before Kolla rollout. The deployed 0.3.8 tag/artifacts remain immutable.
+Tag `0.3.9` points to release commit `4213289fb47791df3e4ac8cdc7090aed5c781fb9`, based on deployed `v0.3.8` commit `8238a321a70665fea2b715e6c68fd42a06c1defa` plus deletion recovery commits `1a42890` and `b2f24d3`. Tag-triggered GitHub Actions run `43391506646` passed all service/SDK/build jobs. API OCI index: `sha256:73a39dc3dc0be51f806204dca99e14b5b28df4e5674e0404f211c6d5541aca83`; worker OCI index: `sha256:40a465ba68bd9976f20779f69adc2959904b039b9629d556af2bfcac8fde1aad`. Both image labels report revision `4213289...` and version `0.3.9`. No schema or dependency changes.
 
 ## Maintainer gates
 
-Run `uv run pytest tests`, `uv run ruff check .`, the SDK suite/lint, and working/staged architecture checks. Wait for the numeric `0.3.9` tag workflow, record image index digests/revision and wheel SHA-256, and deploy only after publication.
+Local release gates passed: service tests `1640 passed, 3 skipped`, root Ruff, SDK tests `44 passed`, SDK Ruff, `uv lock --check`, and working/staged architecture checks. Wheel `waygate-0.3.9-py3-none-any.whl` SHA-256 `e0b569f8bfd696c39d4042826c3c957ffba0a58092e42da61791df067b3f617a` is attached to GitHub Release `0.3.9`.
+
+## DMSLAB rollout verification
+
+- Backups: `/etc/kolla/afterglow-release-backups/waygate-0.3.9-20261113T082532Z/` contains the protected config archive, 77-row/7-table logical DB export, rollback image references and the release wheel. All controllers had rendered `waygate.conf` SHA-256 `162acf5aa43752fda9a0be69fb3227904ed39ad89ddb440e5269ba864fd8cfb3` before and after rollout.
+- `kolla-ansible prechecks` and `deploy --tags waygate` completed with zero failed/unreachable hosts. All six API/worker containers on three controllers run the pinned OCI indexes; API health is 200 and restart counts are 0.
+- Read-only checks: internal `/v1/health` returned 200, unauthenticated `GET /v1/servers` returned 401, authenticated read-only `GET /v1/servers` returned 200. Migration ledger 001–008 and checksums are unchanged; the reported instance remains `DELETED`.
+- One other deletion job was `running` with `last_error=NULL` in the final DB read; completion was not observed. No live provisioning or VPN dataplane test was run.
+
 
 # Waygate 0.3.8 — agent diagnostics, gateway sizing and attachment routes
 

@@ -1,14 +1,17 @@
 # Changelog
 
-## 0.3.9 — candidate prepared 2026-11-13 UTC (not published/deployed)
+## 0.3.9 — released and deployed 2026-11-13 UTC
 
 ### 한국어
-- **버전/일자:** 0.3.9; 후보 준비 2026-11-13 UTC. 발행/운영 배포 대기.
+- **버전/일자:** 0.3.9; numeric tag, GHCR API/worker images, and GitHub Release wheel published; DMSLAB rollout completed 2026-11-13 UTC.
 - Nova 생성 실패 후 기록된 VM과 생성 intent, project, 포트 ID·network가 정확히 일치하면, VM에 연결되지 않은 포트도 삭제 복구에 허용한다. 이후 기존 `force=True` VM 삭제와 durable job 재시도를 사용한다. 소유권 증거가 다르거나 생성 intent가 없으면 계속 거부한다.
+- **배포:** API index `sha256:73a39dc3dc0be51f806204dca99e14b5b28df4e5674e0404f211c6d5541aca83`, worker index `sha256:40a465ba68bd9976f20779f69adc2959904b039b9629d556af2bfcac8fde1aad`; migration 변경 없음.
 
 ### English
-- **Version/date:** 0.3.9; candidate prepared 2026-11-13 UTC. Publication/deployment pending.
+
+- **Version/date:** 0.3.9; numeric tag, GHCR API/worker images and GitHub Release wheel published; DMSLAB rollout completed 2026-11-13 UTC.
 - Permit deletion recovery for a detached provider port only when the recorded VM and create intent, project, port ID, and network match. Reuse Nova `force=True` deletion and durable job retries; reject missing intent or mismatched ownership.
+- **Deployment:** pinned OCI indexes recorded above; no migration or dependency changes.
 
 
 ## 0.3.8 — published and deployed 2026-11-09 UTC
