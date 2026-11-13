@@ -448,7 +448,7 @@ python3 scripts/check_architecture.py --staged
 |---|---|---|
 | server API/status 또는 project ownership | [`waygate/api/servers.py`](waygate/api/servers.py), [`waygate/auth.py`](waygate/auth.py), [`waygate/models/schemas.py`](waygate/models/schemas.py) | 이 문서의 status/API/security/runtime flow, 관련 `tests/test_waygate_*` |
 | durable job/lease/retry | [`waygate/services/jobs.py`](waygate/services/jobs.py), [`waygate/models/orm.py`](waygate/models/orm.py) | transaction 불변식과 `tests/test_waygate_jobs.py`, migration 필요 여부 |
-| Nova/Neutron provisioning/delete | [`waygate/services/provisioner.py`](waygate/services/provisioner.py), [`waygate/services/openstack_ops.py`](waygate/services/openstack_ops.py) | OpenStack resource flow/rollback/limit, `tests/test_waygate_provisioner.py`, `tests/test_waygate_jobs.py::test_delete_force_removes_owned_vm_with_detached_port`, `tests/test_waygate_jobs.py::test_delete_job_retries_cloud_failure_before_terminal_cleanup` |
+| Nova/Neutron provisioning/delete | [`waygate/services/provisioner.py`](waygate/services/provisioner.py), [`waygate/services/openstack_ops.py`](waygate/services/openstack_ops.py) | OpenStack resource flow/rollback/limit, `tests/test_waygate_provisioner.py`, `tests/test_waygate_jobs.py::test_delete_force_removes_owned_vm_with_detached_port`, `tests/test_waygate_jobs.py::test_vm_observation_rejects_provider_port_outside_recorded_scope`, `tests/test_waygate_jobs.py::test_delete_job_retries_cloud_failure_before_terminal_cleanup` |
 | tenant execution delegation/Trust cleanup | [`waygate/services/execution.py`](waygate/services/execution.py), [`waygate/migrations/006_execution_grants.sql`](waygate/migrations/006_execution_grants.sql) | Trust scope/current-authority/cleanup invariants, `tests/test_execution_delegation.py` (native SDK; opt-in `WAYGATE_DELEGATION_MARIADB_URL`), `tests/test_waygate_jobs.py` |
 | agent bearer/desired-state/reconcile/image build | [`waygate/api/agent.py`](waygate/api/agent.py), [`waygate/services/agent_auth.py`](waygate/services/agent_auth.py), [`waygate/agent/`](waygate/agent/), [`deploy/image/packer/`](deploy/image/packer/) | bearer trust boundary, config-file persistence, gateway Address, shared installer/package assets, image property guard, migration 002 and agent/live tests |
 | agent telemetry/diagnostics verdict | [`waygate/services/agent_telemetry.py`](waygate/services/agent_telemetry.py), [`waygate/api/servers.py`](waygate/api/servers.py), [`waygate/templates/waygate_agent.yaml.j2`](waygate/templates/waygate_agent.yaml.j2) | non-blocking best-effort writes, server receive times only, unknown peer state on failed `wg show`, verdict thresholds/hint codes, fail-closed stale-image agent replacement, `tests/test_agent_diagnostics.py`, `tests/test_agent_assets.py` |
@@ -482,9 +482,9 @@ python3 scripts/check_architecture.py --staged
 ```json
 {
   "schema_version": 1,
-  "source_sha256": "ae11a97a2e2664e538055e6650024d9b3c7a63373d7ede7904266601b6dc1f85",
-  "reviewed_at": "2026-11-13T07:35:44Z",
-  "summary": "Reviewed exact scoped detached-port deletion recovery, Nova force delete retries, regression tests, architecture and changelog"
+  "source_sha256": "fbdd7b5a2ad93ec7183f8bb2d7e1364d0054d639d488ff08c7216caa08d00ba6",
+  "reviewed_at": "2026-11-13T07:41:17Z",
+  "summary": "Restore exact VM provider-port project/network ownership checks for detached-port recovery; add direct scope regressions"
 }
 ```
 <!-- architecture-review:end -->

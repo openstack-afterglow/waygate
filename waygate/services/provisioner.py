@@ -203,6 +203,8 @@ async def _observe(conn, record: dict, kind: str, *, deleting=False):
             and port_device_id in ("", None)
         )
         valid = valid and (exact_vm_port or detached_owned_vm_port)
+        valid = valid and (_value(port, "project_id") or _value(port, "tenant_id")) == record["project_id"]
+        valid = valid and _value(port, "network_id") == ((intent or {}).get("network_id") or record.get("provider_network_id"))
     else:
         network_key = "network_id" if kind == "port" else "floating_network_id"
         expected_network = (intent or {}).get("network_id") or record.get("provider_network_id" if kind == "port" else "floating_network_id")

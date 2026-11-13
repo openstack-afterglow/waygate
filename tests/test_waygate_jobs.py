@@ -1010,6 +1010,22 @@ async def test_delete_force_removes_owned_vm_with_detached_port(
         assert server.status == "DELETED" and server.deleted_at is not None
         assert job.status == "completed" and job.last_error is None
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("project_id", "foreign-project"), ("network_id", "foreign-network")],
+)
+async def test_vm_observation_rejects_provider_port_outside_recorded_scope(
+    deletion_store, field, value
+):
+    conn = _owned_delete_connection(deletion_store)
+    port = conn.network.get_port("provider-port")
+    setattr(port, field, value)
+    record = await waygate_db.get_server("project-1", "server-1")
+
+    with pytest.raises(waygate_provisioner.ProvisionIntentUnresolved, match="exact owned scope"):
+        await waygate_provisioner._observe(conn, record, "vm", deleting=True)
+
+
 async def test_cloud_delete_waits_for_inflight_attachment(deletion_store, monkeypatch):
     with Session(deletion_store) as session:
         att = session.scalar(select(WaygateNetworkAttachment))
