@@ -23,7 +23,7 @@ Local release gates passed: service tests `1640 passed, 3 skipped`, root Ruff, S
 - Backups: `/etc/kolla/afterglow-release-backups/waygate-0.3.9-20261113T082532Z/` contains the protected config archive, 77-row/7-table logical DB export, rollback image references and the release wheel. All controllers had rendered `waygate.conf` SHA-256 `162acf5aa43752fda9a0be69fb3227904ed39ad89ddb440e5269ba864fd8cfb3` before and after rollout.
 - `kolla-ansible prechecks` and `deploy --tags waygate` completed with zero failed/unreachable hosts. All six API/worker containers on three controllers run the pinned OCI indexes; API health is 200 and restart counts are 0.
 - Read-only checks: internal `/v1/health` returned 200, unauthenticated `GET /v1/servers` returned 401, authenticated read-only `GET /v1/servers` returned 200. Migration ledger 001–008 and checksums are unchanged; the reported instance remains `DELETED`.
-- One other deletion job was `running` with `last_error=NULL` in the final DB read; completion was not observed. No live provisioning or VPN dataplane test was run.
+- A concurrent delete job was reclaimed as attempt 2 and completed; its server reached `DELETED`. Final queue state: 14 completed, 5 failed, none queued or running. No live provisioning or VPN dataplane test was run.
 
 
 # Waygate 0.3.8 — agent diagnostics, gateway sizing and attachment routes
