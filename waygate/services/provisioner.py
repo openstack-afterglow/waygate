@@ -190,9 +190,19 @@ async def _observe(conn, record: dict, kind: str, *, deleting=False):
             valid = valid and metadata.get("waygate_create_intent") == intent["marker"]
         port_id = (intent or {}).get("port_id") or record.get("provider_port_id")
         port = await _get(conn, "port", port_id) if port_id else None
-        valid = valid and port is not None and _value(port, "device_id") == resource_id
-        valid = valid and (_value(port, "project_id") or _value(port, "tenant_id")) == record["project_id"]
-        valid = valid and _value(port, "network_id") == ((intent or {}).get("network_id") or record.get("provider_network_id"))
+        port_device_id = _value(port, "device_id") if port is not None else None
+        exact_vm_port = port is not None and port_device_id == resource_id
+        detached_owned_vm_port = (
+            deleting
+            and recorded_identity
+            and intent is not None
+            and intent.get("resource_id") == resource_id
+            and intent.get("port_id") == port_id
+            and port is not None
+            and _value(port, "id") == port_id
+            and port_device_id in ("", None)
+        )
+        valid = valid and (exact_vm_port or detached_owned_vm_port)
     else:
         network_key = "network_id" if kind == "port" else "floating_network_id"
         expected_network = (intent or {}).get("network_id") or record.get("provider_network_id" if kind == "port" else "floating_network_id")

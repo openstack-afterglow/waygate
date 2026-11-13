@@ -951,6 +951,65 @@ def _owned_delete_connection(engine, *, floating_ip=False):
     )
     return conn
 
+@pytest.mark.parametrize(
+    ("device_id", "has_intent", "should_delete"),
+    [("", True, True), (None, True, True), ("", False, False), ("foreign-vm", True, False)],
+)
+async def test_delete_force_removes_owned_vm_with_detached_port(
+    deletion_store, monkeypatch, device_id, has_intent, should_delete
+):
+    conn = _owned_delete_connection(deletion_store)
+    port = conn.network.get_port("provider-port")
+    port.device_id = device_id
+    port.description = "waygate:server-1:port:11111111-1111-4111-8111-111111111111"
+    vm = conn.compute.get_server("vm-1")
+    vm.status = "ERROR"
+    if has_intent:
+        vm.metadata["waygate_create_intent"] = "22222222-2222-4222-8222-222222222222"
+    with Session(deletion_store) as session:
+        server = session.get(WaygateServer, "server-1")
+        if has_intent:
+            server.resource_policy_snapshot = {
+                "waygate.provision_intents": {
+                    "port": {
+                        "marker": "11111111-1111-4111-8111-111111111111",
+                        "project_id": "project-1",
+                        "network_id": "provider-net",
+                        "resource_id": "provider-port",
+                    },
+                    "vm": {
+                        "marker": "22222222-2222-4222-8222-222222222222",
+                        "project_id": "project-1",
+                        "network_id": "provider-net",
+                        "port_id": "provider-port",
+                        "resource_id": "vm-1",
+                    },
+                }
+            }
+        session.commit()
+
+    _delegate(monkeypatch, conn)
+    monkeypatch.setattr(waygate_provisioner.neutron, "delete_port", MagicMock())
+    monkeypatch.setattr(waygate_provisioner.waygate_agent_auth, "revoke_report_token_by_server", AsyncMock())
+    assert await _enqueue_delete(deletion_store)
+    assert await waygate_jobs.process_one_job() is True
+
+    if not should_delete:
+        conn.compute.delete_server.assert_not_called()
+        with Session(deletion_store) as session:
+            server = session.get(WaygateServer, "server-1")
+            job = session.scalar(select(WaygateJob).where(WaygateJob.server_id == "server-1"))
+            assert server.deleted_at is None
+            assert (job.status, job.attempts) == ("queued", 1)
+        return
+
+    conn.compute.delete_server.assert_called_once_with("vm-1", force=True, ignore_missing=True)
+    with Session(deletion_store) as session:
+        server = session.get(WaygateServer, "server-1")
+        job = session.scalar(select(WaygateJob).where(WaygateJob.server_id == "server-1"))
+        assert server.status == "DELETED" and server.deleted_at is not None
+        assert job.status == "completed" and job.last_error is None
+
 async def test_cloud_delete_waits_for_inflight_attachment(deletion_store, monkeypatch):
     with Session(deletion_store) as session:
         att = session.scalar(select(WaygateNetworkAttachment))
