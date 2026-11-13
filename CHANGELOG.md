@@ -1,18 +1,20 @@
 # Changelog
 
-## Unreleased deletion recovery
+## 0.3.9 — candidate prepared 2026-11-13 UTC (not published/deployed)
 
 ### 한국어
+- **버전/일자:** 0.3.9; 후보 준비 2026-11-13 UTC. 발행/운영 배포 대기.
 - Nova 생성 실패 후 기록된 VM과 생성 intent, project, 포트 ID·network가 정확히 일치하면, VM에 연결되지 않은 포트도 삭제 복구에 허용한다. 이후 기존 `force=True` VM 삭제와 durable job 재시도를 사용한다. 소유권 증거가 다르거나 생성 intent가 없으면 계속 거부한다.
 
 ### English
+- **Version/date:** 0.3.9; candidate prepared 2026-11-13 UTC. Publication/deployment pending.
 - Permit deletion recovery for a detached provider port only when the recorded VM and create intent, project, port ID, and network match. Reuse Nova `force=True` deletion and durable job retries; reject missing intent or mismatched ownership.
 
 
-## 0.3.8 — candidate prepared 2026-11-09 UTC (not published/deployed)
+## 0.3.8 — published and deployed 2026-11-09 UTC
 
 ### 한국어
-- **버전/일자:** 0.3.8; 후보 준비 2026-11-09 UTC. 발행/운영 배포 일시: 아직 없음.
+- **버전/일자:** 0.3.8; tag `v0.3.8`과 GHCR API/worker images 발행, DMSLAB 운영 배포 2026-11-09 UTC. GitHub Release wheel asset은 업로드하지 않았다.
 - **변경/수정:** prebuilt 모드도 cloud-init에서 현재 agent script/unit을 설치하고 legacy timer와 기존 service를 중지한다. 둘 중 하나를 멈추지 못하면 cloud-init이 fail-closed로 중단해 registration이나 새 agent 시작을 하지 않는다. 오래된 image의 oneshot agent가 register 후 멈추는 문제를 막으며 package 설치는 계속 생략한다.
 - **추가:** `GET /v1/servers/{server_id}/diagnostics`(`waygate:server:get`)가 Waygate 수신 시각 기반 last register/desired-state/status, 기대 client/attachment 수, verdict(`ok`/`never_connected`/`not_polling`/`not_reporting`/`peer_mismatch`/`peer_unknown`)와 hint code를 반환한다. `wg_interface_up=false`이면 이전 peer count를 재사용하지 않고 `peer_unknown`과 `peer_observation_unavailable`을 반환한다. Telemetry는 Valkey에 14일 TTL로 비차단 best-effort 기록한다.
 - **추가(sizing):** `POST /v1/servers`가 선택 `expected_clients`(1–1000 정수)를 받는다. 50 이하는 `waygate.flavor`(small), 초과는 새 선택 resource policy `waygate.flavor_large`(large; admin resource-policy API로 설정)를 사용하며, large policy가 없으면 `waygate.flavor`로 fallback한다. Server 응답에 `expected_clients`와 실제 적용 `flavor_tier`(`small`/`large`/null)가 추가된다.
@@ -21,7 +23,7 @@
 - **폐기/제거/이행:** 추가 migration `008_gateway_sizing_and_attachment_routes`(nullable `expected_clients`/`flavor_tier`, `allowed_ips` JSON)를 새 API/worker 전에 적용해야 하며, 기존 attachment를 `[cidr]`로 backfill해 기존 client routing을 유지한다. 전체 action을 고정한 operator policy는 `waygate:network:update`를 추가해야 한다. Dependency 변경 없음. 이미 생성된 VM은 수정되지 않으므로 재생성이 필요하다.
 
 ### English
-- **Version/date:** 0.3.8; candidate prepared 2026-11-09 UTC. Publication/deployment dates: None yet.
+- **Version/date:** 0.3.8; tag `v0.3.8` and GHCR API/worker images published; DMSLAB deployment completed 2026-11-09 UTC. No GitHub Release wheel asset was uploaded.
 - **Changes/fixes:** Prebuilt cloud-init writes the current agent script/units and stops the legacy timer and prior service. If either cannot stop, cloud-init fails closed before registration or new agent activation. This prevents stale oneshot agents from remaining the active process; package installation remains skipped.
 - **Added:** `GET /v1/servers/{server_id}/diagnostics` (`waygate:server:get`) returns server-observed register/desired-state/status times, expected clients/attachments, verdict and stable hints. A failed `wg show` returns `peer_unknown` with `peer_observation_unavailable`; cached peer counts never make a failed read appear healthy. Telemetry is a non-blocking best-effort Valkey hash with a 14-day TTL.
 - **Added (sizing):** `POST /v1/servers` accepts optional `expected_clients` (integer 1–1000). <=50 uses `waygate.flavor` (small); more uses the new optional resource policy `waygate.flavor_large` (large; set through the admin resource-policy API), falling back to `waygate.flavor` when unset. Server responses add `expected_clients` and the applied `flavor_tier` (`small`/`large`/null).

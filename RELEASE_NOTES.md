@@ -1,7 +1,27 @@
+# Waygate 0.3.9 — owned detached-port delete recovery
+
+## 한국어
+- **버전/일자:** 0.3.9; 후보 준비 2026-11-13 UTC. 발행/운영 배포 대기.
+- **수정:** Nova 생성 실패 뒤 VM이 ERROR이고 기록된 provider port가 미연결 상태여도, DB VM identity/create intent와 VM metadata, port ID/project/network가 정확히 일치하면 삭제 worker가 기존 `force=True` Nova delete 후 durable job 재시도를 수행한다. Intent 누락·범위 불일치는 계속 거부한다.
+- **이행:** API/worker 이미지와 Kolla wheel의 버전을 0.3.9로 올린다. Schema/migration, dependency, SDK contract 변경은 없다. Numeric tag `0.3.9`를 사용한다. Existing VMs are otherwise unchanged.
+
+## English
+- **Version/date:** 0.3.9; candidate prepared 2026-11-13 UTC. Publication/deployment pending.
+- **Fixed:** After Nova create failure, permit deletion when an ERROR VM's recorded provider port is detached only if durable VM identity/create intent, VM metadata, and exact port ID/project/network still match. Reuse Nova `force=True` and durable job retries; reject missing intent or scope mismatch.
+- **Upgrade:** Update API/worker images and the Kolla wheel to 0.3.9. No schema/migration, dependency, or SDK contract changes. Use numeric release tag `0.3.9`; existing VMs are otherwise unchanged.
+
+## Source provenance and release gates
+
+The candidate includes deletion recovery commits `1a42890` and `b2f24d3` on top of deployed Waygate 0.3.8 source `8238a321a70665fea2b715e6c68fd42a06c1defa`. Release only from the reviewed version-bump commit. The numeric tag-triggered Docker workflow must pass service and SDK gates before publishing immutable API/worker digests. Build the Kolla wheel from that same commit, verify its shared role and checksum, then attach it to GitHub Release `0.3.9`. Back up MariaDB, protected config and prior immutable digests; pin the new image digests and install the same-source wheel before Kolla rollout. The deployed 0.3.8 tag/artifacts remain immutable.
+
+## Maintainer gates
+
+Run `uv run pytest tests`, `uv run ruff check .`, the SDK suite/lint, and working/staged architecture checks. Wait for the numeric `0.3.9` tag workflow, record image index digests/revision and wheel SHA-256, and deploy only after publication.
+
 # Waygate 0.3.8 — agent diagnostics, gateway sizing and attachment routes
 
 ## 한국어
-- **버전/일자:** 0.3.8; 후보 준비 2026-11-09 UTC. 발행/운영 배포 일시: 아직 없음.
+- **버전/일자:** 0.3.8; immutable tag `v0.3.8`, GHCR API/worker images 발행, DMSLAB 운영 배포 2026-11-09 UTC. GitHub Release wheel asset은 업로드하지 않았다.
 - **추가:** `GET /v1/servers/{server_id}/diagnostics`가 Waygate 수신 시각, 예상 client/attachment 수, 상태 verdict/hint를 반환한다. `wg show` 실패 시 cached peer 수를 최신 관측처럼 재사용하지 않고 `peer_unknown`을 반환한다.
 - **추가:** `POST /v1/servers`의 선택 필드 `expected_clients`(1–1000)가 50명 초과일 때 선택적 `waygate.flavor_large`를 사용한다. 설정하지 않으면 `waygate.flavor`로 fallback한다.
 - **변경:** attachment별 `allowed_ips`를 지원한다. 기존 subnet CIDR은 physical interface/NAT용으로 유지하고, client `AllowedIPs`는 attachment별 route 합집합을 사용한다. `PATCH /v1/servers/{server_id}/networks/{attachment_id}`는 `waygate:network:update`를 요구한다. 소유 project network와 Neutron이 명시한 shared/external provider network만 연결할 수 있다.
@@ -10,7 +30,7 @@
 - **버전 경계:** root distribution/runtime/lock/Kolla registry default는 `0.3.8`; independent SDK는 `0.2.0`으로 유지한다. SDK에는 diagnostics/attachment-route 전용 method가 추가되지 않아 이 API는 REST로 호출한다. 기존 gateway VM agent는 자동 변경되지 않는다.
 
 ## English
-- **Version/date:** 0.3.8; candidate prepared 2026-11-09 UTC. Publication/deployment dates: None yet.
+- **Version/date:** 0.3.8; immutable tag `v0.3.8`, GHCR API/worker images published, and DMSLAB deployment completed 2026-11-09 UTC. No GitHub Release wheel asset was uploaded.
 - **Added:** `GET /v1/servers/{server_id}/diagnostics` reports Waygate receive times, expected client/attachment counts and a bounded verdict/hint. A failed `wg show` returns `peer_unknown`; a cached peer count is never treated as a current observation.
 - **Added:** Optional `expected_clients` (1–1000) on `POST /v1/servers` selects optional `waygate.flavor_large` above 50 clients, falling back to `waygate.flavor` when unset.
 - **Changed:** Network attachments accept per-attachment `allowed_ips`. The subnet CIDR remains the physical-interface/NAT route; client `AllowedIPs` uses the union of attachment routes. `PATCH /v1/servers/{server_id}/networks/{attachment_id}` requires `waygate:network:update`. Only owned or explicitly shared/external Neutron networks are attachable.
@@ -20,18 +40,17 @@
 
 ## Source provenance and release boundaries
 
-The candidate starts from observed `origin/dev` commit `89cdd1b9d7138abed168839b25072ba085943506` and includes diagnostics commit `7b73cb2` plus attachment/sizing commit `ff3eaee`. The dirty primary checkout contains unrelated administrator-executor work and is not included. Create immutable annotated tag `v0.3.8`; the Docker metadata action emits semver image tag `0.3.8` and may also update its automatic `latest` tag. The workflow publishes hosted `linux/amd64` API/worker images after the service/SDK test gate. It does not create a GitHub Release or upload a wheel.
+Release tag `v0.3.8` points to commit `8238a321a70665fea2b715e6c68fd42a06c1defa`. The published `linux/amd64` OCI indexes were API `sha256:ca55cc711aebee069d005360e3d4023591f3a0e5433c0896af1ff059e9f3db92` and worker `sha256:7eee815f484e593ea1ec7b602676decea474045d3463c9dbf5da86938ada8d40`, both labelled with that revision. The 2026-11-09 DMSLAB rollout used those digests and applied migration 008. Wheel `waygate-0.3.8-py3-none-any.whl` was built (SHA-256 `9b3acc4f2c7831570d8aeb6acf8f2042bea33d4371ceb7730aec5619cbf3f89c`) but not uploaded; production installed the exact tag directly without dependency changes. Tag and published images remain immutable.
 
 ## Upgrade prerequisites
 
 Back up MariaDB, encryption key, effective Kolla configuration and previous immutable API/worker image digests. Quiesce lifecycle admission, finish or reconcile jobs, and stop the old API/worker cohort before starting the new code. Apply migration `008_gateway_sizing_and_attachment_routes` through the documented Kolla bootstrap/upgrade path; `reconfigure` does not apply migrations. Preserve `waygate_source_version` unless source mode is explicitly qualified against the release commit. Existing VMs retain their current agent and require separate recreation to change it.
 
-## Maintainer gates and manual publication
+## 0.3.8 release and production record
 
-1. On the reviewed candidate commit, run `python3 scripts/check_architecture.py --stamp --summary "Reviewed diagnostics, agent boot replacement, attachment routes, gateway sizing, migration 008 and provider cancellation/recovery"` and `python3 scripts/check_architecture.py`. Run frozen service/SDK sync, serial and four-worker service tests, both Ruff checks, and `python3 scripts/check_architecture.py --staged` after staging only intended files.
-2. Create annotated tag `v0.3.8` on the exact release commit, push the release branch and then the tag. Wait for the tag-triggered Docker workflow to pass; record both GHCR `linux/amd64` image digests and source revision. Do not move tags or overwrite artifacts.
-3. Build the same-source Kolla wheel with `uv build --wheel --out-dir dist/0.3.8`, inspect its metadata/shared-data role, and record its SHA-256. The workflow does not upload the wheel. Attach it manually with `gh release create v0.3.8 dist/0.3.8/waygate-0.3.8-py3-none-any.whl --verify-tag --title 'Waygate 0.3.8' --notes-file RELEASE_NOTES.md`. This is a GitHub asset upload, not a PyPI release.
-4. Roll out only after publication. Pin the qualified image digests, install the same-source role/wheel, use the approved Kolla path, and verify migration, readiness, authenticated behavior and live lifecycle separately. `/v1/health` alone is not readiness or dataplane proof.
+- GitHub Actions `Docker Build & Push` for `dev` and `v0.3.8` passed the service/SDK test gate and published the two OCI indexes above.
+- DMSLAB prechecks/deploy succeeded across three controllers. All six API/worker containers reported the release digests, revision `8238a321…`, healthy APIs, and zero restarts.
+- The checksum ledger through 008 matched the release manifest; existing attachment routes were backfilled. Rendered configuration/policy remained byte-identical. Authenticated and live lifecycle verification remained limited as detailed in the archived rollout report.
 
 # Waygate 0.3.7 — native Trust execution correction candidate
 
